@@ -71,10 +71,16 @@ async function init() {
     const textureA = device.createTexture(textureDesc);
     const textureB = device.createTexture(textureDesc);
 
+    // --- Time Buffer ---
+    const timeBuffer = device.createBuffer({
+        size: 4,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
     // --- Palette Buffer ---
-    // struct Palette { bg: vec4<f32>, fg: vec4<f32> }
-    // Size: 4 * 4 * 2 = 32 bytes
-    const paletteBufferSize = 32;
+    // struct Palette { bg: vec4<f32>, fg: vec4<f32>, chaos: vec4<f32> }
+    // Size: 4 * 4 * 3 = 48 bytes
+    const paletteBufferSize = 48;
     const paletteBuffer = device.createBuffer({
         size: paletteBufferSize,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -87,15 +93,16 @@ async function init() {
         return [r, g, b, 1.0];
     }
 
-    function updatePalette(bgHex, fgHex) {
+    function updatePalette(bgHex, fgHex, chaosHex) {
         const bg = hexToRgb(bgHex);
         const fg = hexToRgb(fgHex);
-        const data = new Float32Array([...bg, ...fg]);
+        const chaos = hexToRgb(chaosHex);
+        const data = new Float32Array([...bg, ...fg, ...chaos]);
         device.queue.writeBuffer(paletteBuffer, 0, data);
     }
 
-    // Initial Palette (Cyber)
-    updatePalette("#05050D", "#00FFCC");
+    // Initial Palette (System Default)
+    updatePalette("#29AE93", "#00FFCC", "#FFA500");
 
     // --- Sampler for rendering ---
     const sampler = device.createSampler({
@@ -104,12 +111,12 @@ async function init() {
     });
 
     // --- Bind Groups ---
-    // We need two bind groups for compute (A->B and B->A)
     const computeBindGroupA = device.createBindGroup({
         layout: computePipeline.getBindGroupLayout(0),
         entries: [
             { binding: 1, resource: textureA.createView() },
             { binding: 2, resource: textureB.createView() },
+            { binding: 3, resource: { buffer: timeBuffer } },
         ],
     });
 
@@ -118,11 +125,11 @@ async function init() {
         entries: [
             { binding: 1, resource: textureB.createView() },
             { binding: 2, resource: textureA.createView() },
+            { binding: 3, resource: { buffer: timeBuffer } },
         ],
     });
 
     // We need two bind groups for rendering (Read A or Read B)
-    // Add Palette Buffer at Binding 0
     const renderBindGroupA = device.createBindGroup({
         layout: renderPipeline.getBindGroupLayout(0),
         entries: [
@@ -144,13 +151,17 @@ async function init() {
     const genElem = document.getElementById("generation");
     const playPauseBtn = document.getElementById("playPauseBtn");
     const randomSoupBtn = document.getElementById("randomSoupBtn");
+    const crossBtn = document.getElementById("crossBtn");
+    const dotBtn = document.getElementById("dotBtn");
+    const yinYangBtn = document.getElementById("yinYangBtn");
     const fpsCapInput = document.getElementById("fpsCap");
     const toggleMenuBtn = document.getElementById("toggleMenuBtn");
     const overlay = document.getElementById("overlay");
 
     const colorBgInput = document.getElementById("colorBg");
     const colorFgInput = document.getElementById("colorFg");
-    const presetBtns = document.querySelectorAll(".preset-btn");
+    const colorChaosInput = document.getElementById("colorChaos");
+    const systemPresetBtn = document.getElementById("systemPresetBtn");
 
     // --- State ---
     let frameCount = 0;
@@ -196,11 +207,82 @@ async function init() {
     });
 
     randomSoupBtn.addEventListener("click", () => {
-        const soupData = new Float32Array(GRID_SIZE * GRID_SIZE);
+        const data = new Float32Array(GRID_SIZE * GRID_SIZE);
         for (let i = 0; i < GRID_SIZE * GRID_SIZE; i++) {
-            soupData[i] = Math.random() > 0.5 ? 1.0 : 0.0;
+            data[i] = Math.random() > 0.5 ? 1.0 : 0.0;
         }
-        uploadData(soupData);
+        uploadData(data);
+    });
+
+    crossBtn.addEventListener("click", () => {
+        const data = new Float32Array(GRID_SIZE * GRID_SIZE);
+        data.fill(0.0);
+        const mid = Math.floor(GRID_SIZE / 2);
+        for (let i = 0; i < GRID_SIZE; i++) {
+            data[mid * GRID_SIZE + i] = 2.0; // Horizontal
+            data[i * GRID_SIZE + mid] = 2.0; // Vertical
+        }
+        uploadData(data);
+    });
+
+    dotBtn.addEventListener("click", () => {
+        const data = new Float32Array(GRID_SIZE * GRID_SIZE);
+        data.fill(0.0);
+        const mid = Math.floor(GRID_SIZE / 2);
+        const r = 2; // 5x5 center means radius 2
+        for (let y = mid - r; y <= mid + r; y++) {
+            for (let x = mid - r; x <= mid + r; x++) {
+                data[y * GRID_SIZE + x] = 2.0;
+            }
+        }
+        uploadData(data);
+    });
+
+    yinYangBtn.addEventListener("click", () => {
+        const data = new Float32Array(GRID_SIZE * GRID_SIZE);
+        const mid = GRID_SIZE / 2;
+        const R = GRID_SIZE / 3;
+        const r_dot = R / 5; // Size of the small dots
+
+        for (let y = 0; y < GRID_SIZE; y++) {
+            for (let x = 0; x < GRID_SIZE; x++) {
+                const dx = x - mid;
+                const dy = y - mid;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                if (dist > R) {
+                    data[y * GRID_SIZE + x] = 2.0; // Chaos outside
+                    continue;
+                }
+
+                // Distances to centers of the two semi-circles/dots
+                // Top center (for negative dy)
+                const d_top = Math.sqrt(dx * dx + (dy + R / 2) ** 2);
+                // Bottom center (for positive dy)
+                const d_bot = Math.sqrt(dx * dx + (dy - R / 2) ** 2);
+
+                // Logic for Yin-Yang
+                // 1. Small dots (highest priority)
+                if (d_top < r_dot) {
+                    data[y * GRID_SIZE + x] = 1.0; // Alive dot in Dead section
+                } else if (d_bot < r_dot) {
+                    data[y * GRID_SIZE + x] = 0.0; // Dead dot in Alive section
+                }
+                // 2. Large semi-circles (create the S-curve)
+                else if (d_top < R / 2) {
+                    data[y * GRID_SIZE + x] = 0.0; // Dead bulge
+                } else if (d_bot < R / 2) {
+                    data[y * GRID_SIZE + x] = 1.0; // Alive bulge
+                }
+                // 3. Base halves
+                else if (dx > 0) {
+                    data[y * GRID_SIZE + x] = 1.0; // Right is Alive
+                } else {
+                    data[y * GRID_SIZE + x] = 0.0; // Left is Dead
+                }
+            }
+        }
+        uploadData(data);
     });
 
     fpsCapInput.addEventListener("change", (e) => {
@@ -216,20 +298,18 @@ async function init() {
     });
 
     function handleColorChange() {
-        updatePalette(colorBgInput.value, colorFgInput.value);
+        updatePalette(colorBgInput.value, colorFgInput.value, colorChaosInput.value);
     }
 
     colorBgInput.addEventListener("input", handleColorChange);
     colorFgInput.addEventListener("input", handleColorChange);
+    colorChaosInput.addEventListener("input", handleColorChange);
 
-    presetBtns.forEach(btn => {
-        btn.addEventListener("click", () => {
-            const bg = btn.dataset.bg;
-            const fg = btn.dataset.fg;
-            colorBgInput.value = bg;
-            colorFgInput.value = fg;
-            updatePalette(bg, fg);
-        });
+    systemPresetBtn.addEventListener("click", () => {
+        colorBgInput.value = "#29AE93";
+        colorFgInput.value = "#00FFCC";
+        colorChaosInput.value = "#FFA500";
+        updatePalette("#29AE93", "#00FFCC", "#FFA500");
     });
 
     // --- Resize Handling ---
@@ -251,6 +331,9 @@ async function init() {
 
         const now = performance.now();
         const elapsed = now - then;
+
+        // Update Time Uniform
+        device.queue.writeBuffer(timeBuffer, 0, new Float32Array([now / 1000.0]));
 
         // FPS Counter update (independent of cap)
         if (now - lastTime >= 1000) {

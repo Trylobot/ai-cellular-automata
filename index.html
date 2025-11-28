@@ -14,11 +14,16 @@
         <div class="overlay" id="overlay">
             <button id="toggleMenuBtn" class="toggle-btn" aria-label="Toggle Menu">−</button>
             <div class="menu-content" id="menuContent">
-                <h1>Day and Night</h1>
+                <h1>Day and Night (and ???)</h1>
                 <p>WebGPU Cellular Automata</p>
                 <div class="controls-row">
                     <button id="playPauseBtn">Play</button>
                     <button id="randomSoupBtn">Random Soup</button>
+                </div>
+                <div class="controls-row">
+                    <button id="crossBtn">Cross</button>
+                    <button id="dotBtn">Dot</button>
+                    <button id="yinYangBtn">Yin-Yang</button>
                 </div>
                 <div class="controls-row">
                     <label for="fpsCap">Max FPS:</label>
@@ -33,18 +38,19 @@
                 <div class="controls-row">
                     <div class="color-picker-group">
                         <label for="colorBg">Dead</label>
-                        <input type="color" id="colorBg" value="#05050D">
+                        <input type="color" id="colorBg" value="#29AE93">
                     </div>
                     <div class="color-picker-group">
                         <label for="colorFg">Alive</label>
                         <input type="color" id="colorFg" value="#00FFCC">
                     </div>
+                    <div class="color-picker-group">
+                        <label for="colorChaos">Chaos</label>
+                        <input type="color" id="colorChaos" value="#FFA500">
+                    </div>
                 </div>
                 <div class="controls-row">
-                    <button class="preset-btn" data-bg="#05050D" data-fg="#00FFCC">Cyber</button>
-                    <button class="preset-btn" data-bg="#000000" data-fg="#FFFFFF">Mono</button>
-                    <button class="preset-btn" data-bg="#2D1B2E" data-fg="#B0E0E6">Retro</button>
-                    <button class="preset-btn" data-bg="#001F3F" data-fg="#FF851B">Sunset</button>
+                    <button class="preset-btn" id="systemPresetBtn">System Default</button>
                 </div>
 
                 <div class="separator"></div>
