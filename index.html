@@ -24,6 +24,31 @@
                     <label for="fpsCap">Max FPS:</label>
                     <input type="number" id="fpsCap" value="12" min="1" max="144">
                 </div>
+
+                <div class="separator"></div>
+
+                <div class="controls-row">
+                    <label>Palette:</label>
+                </div>
+                <div class="controls-row">
+                    <div class="color-picker-group">
+                        <label for="colorBg">Dead</label>
+                        <input type="color" id="colorBg" value="#05050D">
+                    </div>
+                    <div class="color-picker-group">
+                        <label for="colorFg">Alive</label>
+                        <input type="color" id="colorFg" value="#00FFCC">
+                    </div>
+                </div>
+                <div class="controls-row">
+                    <button class="preset-btn" data-bg="#05050D" data-fg="#00FFCC">Cyber</button>
+                    <button class="preset-btn" data-bg="#000000" data-fg="#FFFFFF">Mono</button>
+                    <button class="preset-btn" data-bg="#2D1B2E" data-fg="#B0E0E6">Retro</button>
+                    <button class="preset-btn" data-bg="#001F3F" data-fg="#FF851B">Sunset</button>
+                </div>
+
+                <div class="separator"></div>
+
                 <div class="stats-row">
                     <span id="fps">FPS: 0</span>
                     <span id="generation">Gen: 0</span>

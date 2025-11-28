@@ -71,6 +71,74 @@ async function init() {
     const textureA = device.createTexture(textureDesc);
     const textureB = device.createTexture(textureDesc);
 
+    // --- Palette Buffer ---
+    // struct Palette { bg: vec4<f32>, fg: vec4<f32> }
+    // Size: 4 * 4 * 2 = 32 bytes
+    const paletteBufferSize = 32;
+    const paletteBuffer = device.createBuffer({
+        size: paletteBufferSize,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    function hexToRgb(hex) {
+        const r = parseInt(hex.slice(1, 3), 16) / 255;
+        const g = parseInt(hex.slice(3, 5), 16) / 255;
+        const b = parseInt(hex.slice(5, 7), 16) / 255;
+        return [r, g, b, 1.0];
+    }
+
+    function updatePalette(bgHex, fgHex) {
+        const bg = hexToRgb(bgHex);
+        const fg = hexToRgb(fgHex);
+        const data = new Float32Array([...bg, ...fg]);
+        device.queue.writeBuffer(paletteBuffer, 0, data);
+    }
+
+    // Initial Palette (Cyber)
+    updatePalette("#05050D", "#00FFCC");
+
+    // --- Sampler for rendering ---
+    const sampler = device.createSampler({
+        magFilter: "nearest",
+        minFilter: "nearest",
+    });
+
+    // --- Bind Groups ---
+    // We need two bind groups for compute (A->B and B->A)
+    const computeBindGroupA = device.createBindGroup({
+        layout: computePipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 1, resource: textureA.createView() },
+            { binding: 2, resource: textureB.createView() },
+        ],
+    });
+
+    const computeBindGroupB = device.createBindGroup({
+        layout: computePipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 1, resource: textureB.createView() },
+            { binding: 2, resource: textureA.createView() },
+        ],
+    });
+
+    // We need two bind groups for rendering (Read A or Read B)
+    // Add Palette Buffer at Binding 0
+    const renderBindGroupA = device.createBindGroup({
+        layout: renderPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: paletteBuffer } },
+            { binding: 3, resource: textureA.createView() },
+        ],
+    });
+
+    const renderBindGroupB = device.createBindGroup({
+        layout: renderPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: paletteBuffer } },
+            { binding: 3, resource: textureB.createView() },
+        ],
+    });
+
     // --- UI Elements ---
     const fpsElem = document.getElementById("fps");
     const genElem = document.getElementById("generation");
@@ -79,6 +147,10 @@ async function init() {
     const fpsCapInput = document.getElementById("fpsCap");
     const toggleMenuBtn = document.getElementById("toggleMenuBtn");
     const overlay = document.getElementById("overlay");
+
+    const colorBgInput = document.getElementById("colorBg");
+    const colorFgInput = document.getElementById("colorFg");
+    const presetBtns = document.querySelectorAll(".preset-btn");
 
     // --- State ---
     let frameCount = 0;
@@ -117,45 +189,6 @@ async function init() {
 
     uploadData(blankData);
 
-    // --- Sampler for rendering ---
-    const sampler = device.createSampler({
-        magFilter: "nearest",
-        minFilter: "nearest",
-    });
-
-    // --- Bind Groups ---
-    // We need two bind groups for compute (A->B and B->A)
-    const computeBindGroupA = device.createBindGroup({
-        layout: computePipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 1, resource: textureA.createView() },
-            { binding: 2, resource: textureB.createView() },
-        ],
-    });
-
-    const computeBindGroupB = device.createBindGroup({
-        layout: computePipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 1, resource: textureB.createView() },
-            { binding: 2, resource: textureA.createView() },
-        ],
-    });
-
-    // We need two bind groups for rendering (Read A or Read B)
-    const renderBindGroupA = device.createBindGroup({
-        layout: renderPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 3, resource: textureA.createView() },
-        ],
-    });
-
-    const renderBindGroupB = device.createBindGroup({
-        layout: renderPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 3, resource: textureB.createView() },
-        ],
-    });
-
     // --- Event Listeners ---
     playPauseBtn.addEventListener("click", () => {
         isPlaying = !isPlaying;
@@ -180,6 +213,23 @@ async function init() {
     toggleMenuBtn.addEventListener("click", () => {
         overlay.classList.toggle("collapsed");
         toggleMenuBtn.textContent = overlay.classList.contains("collapsed") ? "+" : "−";
+    });
+
+    function handleColorChange() {
+        updatePalette(colorBgInput.value, colorFgInput.value);
+    }
+
+    colorBgInput.addEventListener("input", handleColorChange);
+    colorFgInput.addEventListener("input", handleColorChange);
+
+    presetBtns.forEach(btn => {
+        btn.addEventListener("click", () => {
+            const bg = btn.dataset.bg;
+            const fg = btn.dataset.fg;
+            colorBgInput.value = bg;
+            colorFgInput.value = fg;
+            updatePalette(bg, fg);
+        });
     });
 
     // --- Resize Handling ---
@@ -236,7 +286,7 @@ async function init() {
             const renderPass = commandEncoder.beginRenderPass({
                 colorAttachments: [{
                     view: textureView,
-                    clearValue: { r: 0.02, g: 0.02, b: 0.05, a: 1 }, // Match bg color
+                    clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1 }, // Clear to black, shader handles bg
                     loadOp: "clear",
                     storeOp: "store",
                 }],

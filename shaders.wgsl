@@ -82,6 +82,12 @@ fn vertexMain(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 }
 
 // Fragment Shader
+struct Palette {
+    bg: vec4<f32>,
+    fg: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> palette: Palette;
 @group(0) @binding(3) var cellTexture: texture_2d<f32>;
 
 @fragment
@@ -90,14 +96,7 @@ fn fragmentMain(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let coords = vec2<i32>(uv * vec2<f32>(size));
     let state = textureLoad(cellTexture, coords, 0).r;
     
-    // Aesthetic coloring
-    // Background: Dark Blue/Black
-    // Active: Bright Cyan/White
+    let color = mix(palette.bg, palette.fg, state);
     
-    let bg = vec3<f32>(0.02, 0.02, 0.05);
-    let fg = vec3<f32>(0.0, 1.0, 0.8); // Cyan
-    
-    let color = mix(bg, fg, state);
-    
-    return vec4<f32>(color, 1.0);
+    return color;
 }
