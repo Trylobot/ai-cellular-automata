@@ -11,13 +11,23 @@
 <body>
     <div id="app">
         <canvas id="gpuCanvas"></canvas>
-        <div class="overlay">
-            <h1>Day and Night</h1>
-            <p>WebGPU Cellular Automata</p>
-            <div class="controls">
-                <button id="playPauseBtn">Play</button>
-                <span id="fps">FPS: 0</span>
-                <span id="generation">Gen: 0</span>
+        <div class="overlay" id="overlay">
+            <button id="toggleMenuBtn" class="toggle-btn" aria-label="Toggle Menu">−</button>
+            <div class="menu-content" id="menuContent">
+                <h1>Day and Night</h1>
+                <p>WebGPU Cellular Automata</p>
+                <div class="controls-row">
+                    <button id="playPauseBtn">Play</button>
+                    <button id="randomSoupBtn">Random Soup</button>
+                </div>
+                <div class="controls-row">
+                    <label for="fpsCap">Max FPS:</label>
+                    <input type="number" id="fpsCap" value="12" min="1" max="144">
+                </div>
+                <div class="stats-row">
+                    <span id="fps">FPS: 0</span>
+                    <span id="generation">Gen: 0</span>
+                </div>
             </div>
         </div>
     </div>
