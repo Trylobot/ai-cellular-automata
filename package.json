@@ -1,0 +1,7 @@
+{
+  "name": "ai-cellular-automata",
+  "version": "1.0.0",
+  "scripts": {
+    "run": "npx serve"
+  }
+}

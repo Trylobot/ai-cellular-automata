@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU Day and Night Cellular Automata</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div id="app">
+        <canvas id="gpuCanvas"></canvas>
+        <div class="overlay">
+            <h1>Day and Night</h1>
+            <p>WebGPU Cellular Automata</p>
+            <div class="controls">
+                <button id="playPauseBtn">Play</button>
+                <span id="fps">FPS: 0</span>
+                <span id="generation">Gen: 0</span>
+            </div>
+        </div>
+    </div>
+    <script type="module" src="main.js"></script>
+</body>
+
+</html>
