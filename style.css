@@ -3,7 +3,6 @@
     --text-color: #e0e0e0;
     --accent-color: #00ff9d;
     --panel-bg: rgba(0, 0, 0, 0.7);
-    --font-family: 'Inter', system-ui, -apple-system, sans-serif;
 }
 
 * {
@@ -18,6 +17,7 @@ body {
     overflow: hidden;
     width: 100vw;
     height: 100vh;
+    font-family: monospace;
 }
 
 #app {
