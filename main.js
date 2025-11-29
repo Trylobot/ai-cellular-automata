@@ -59,7 +59,6 @@ async function init() {
     });
 
     // --- Textures & Buffers ---
-    // Use r32float because rgba8unorm is often not storage-capable
     const textureDesc = {
         size: [GRID_SIZE, GRID_SIZE],
         format: "r32float",
@@ -78,8 +77,6 @@ async function init() {
     });
 
     // --- Palette Buffer ---
-    // struct Palette { bg: vec4<f32>, fg: vec4<f32>, chaos: vec4<f32>, alwaysDead: vec4<f32>, alwaysAlive: vec4<f32> }
-    // Size: 4 * 4 * 5 = 80 bytes
     const paletteBufferSize = 80;
     const paletteBuffer = device.createBuffer({
         size: paletteBufferSize,
@@ -106,12 +103,6 @@ async function init() {
     // Initial Palette (System Default)
     updatePalette("#29AE93", "#00FFCC", "#FFA500", "#003300", "#CCFFCC");
 
-    // --- Sampler for rendering ---
-    const sampler = device.createSampler({
-        magFilter: "nearest",
-        minFilter: "nearest",
-    });
-
     // --- Bind Groups ---
     const computeBindGroupA = device.createBindGroup({
         layout: computePipeline.getBindGroupLayout(0),
@@ -131,7 +122,6 @@ async function init() {
         ],
     });
 
-    // We need two bind groups for rendering (Read A or Read B)
     const renderBindGroupA = device.createBindGroup({
         layout: renderPipeline.getBindGroupLayout(0),
         entries: [
@@ -146,6 +136,226 @@ async function init() {
             { binding: 0, resource: { buffer: paletteBuffer } },
             { binding: 3, resource: textureB.createView() },
         ],
+    });
+
+    // --- Patterns ---
+    const patterns = [
+        {
+            name: "Glider",
+            w: 3, h: 3,
+            data: [
+                0, 1, 0,
+                0, 0, 1,
+                1, 1, 1
+            ]
+        },
+        {
+            name: "LWSS",
+            w: 5, h: 4,
+            data: [
+                0, 1, 1, 1, 1,
+                1, 0, 0, 0, 1,
+                0, 0, 0, 0, 1,
+                1, 0, 0, 1, 0
+            ]
+        },
+        {
+            name: "Block",
+            w: 2, h: 2,
+            data: [
+                1, 1,
+                1, 1
+            ]
+        },
+        {
+            name: "Rocket (Placeholder)",
+            w: 5, h: 5,
+            data: [
+                0, 0, 1, 0, 0,
+                0, 1, 1, 1, 0,
+                1, 0, 1, 0, 1,
+                0, 1, 1, 1, 0,
+                0, 1, 0, 1, 0
+            ]
+        }
+    ];
+
+    // --- Stamp Tool State ---
+    let isStampActive = false;
+    let currentPatternIndex = 0;
+    let mouseX = 0;
+    let mouseY = 0;
+
+    // --- Stamp Tool UI ---
+    const stampToggleBtn = document.getElementById("stampToggleBtn");
+    const stampControls = document.getElementById("stampControls");
+    const patternGrid = document.getElementById("patternGrid");
+    const overlayCanvas = document.getElementById("overlayCanvas");
+    const overlayCtx = overlayCanvas.getContext("2d");
+
+    // --- Stamp Shader Bindings ---
+    const stampPipeline = device.createComputePipeline({
+        label: "Stamp Pipeline",
+        layout: "auto",
+        compute: {
+            module: shaderModule,
+            entryPoint: "stampMain",
+        },
+    });
+
+    const stampUniformBuffer = device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const patternDataBuffer = device.createBuffer({
+        size: 1024,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    const stampBindGroupA = device.createBindGroup({
+        layout: stampPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 1, resource: textureA.createView() },
+            { binding: 2, resource: textureB.createView() },
+            { binding: 4, resource: { buffer: stampUniformBuffer } },
+            { binding: 5, resource: { buffer: patternDataBuffer } },
+        ],
+    });
+
+    const stampBindGroupB = device.createBindGroup({
+        layout: stampPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 1, resource: textureB.createView() },
+            { binding: 2, resource: textureA.createView() },
+            { binding: 4, resource: { buffer: stampUniformBuffer } },
+            { binding: 5, resource: { buffer: patternDataBuffer } },
+        ],
+    });
+
+    // --- Generate Icons ---
+    function generatePatternIcon(pattern) {
+        const iconCanvas = document.createElement("canvas");
+        iconCanvas.width = pattern.w;
+        iconCanvas.height = pattern.h;
+        const ctx = iconCanvas.getContext("2d");
+
+        const imgData = ctx.createImageData(pattern.w, pattern.h);
+        for (let i = 0; i < pattern.data.length; i++) {
+            const val = pattern.data[i];
+            const offset = i * 4;
+            if (val === 1) {
+                imgData.data[offset] = 0;   // R
+                imgData.data[offset + 1] = 255; // G
+                imgData.data[offset + 2] = 204; // B
+                imgData.data[offset + 3] = 255; // A
+            } else {
+                imgData.data[offset] = 0;
+                imgData.data[offset + 1] = 0;
+                imgData.data[offset + 2] = 0;
+                imgData.data[offset + 3] = 0;
+            }
+        }
+        ctx.putImageData(imgData, 0, 0);
+        return iconCanvas.toDataURL();
+    }
+
+    function initStampUI() {
+        patterns.forEach((p, index) => {
+            const btn = document.createElement("div");
+            btn.className = "pattern-btn";
+            if (index === 0) btn.classList.add("active");
+
+            const img = document.createElement("img");
+            img.src = generatePatternIcon(p);
+            btn.appendChild(img);
+
+            btn.addEventListener("click", () => {
+                document.querySelectorAll(".pattern-btn").forEach(b => b.classList.remove("active"));
+                btn.classList.add("active");
+                currentPatternIndex = index;
+            });
+
+            patternGrid.appendChild(btn);
+        });
+    }
+    initStampUI();
+
+    stampToggleBtn.addEventListener("click", () => {
+        isStampActive = !isStampActive;
+        stampToggleBtn.textContent = isStampActive ? "ON" : "OFF";
+        stampControls.classList.toggle("hidden", !isStampActive);
+
+        if (isStampActive) {
+            overlayCanvas.style.pointerEvents = "auto";
+        } else {
+            overlayCanvas.style.pointerEvents = "none";
+            overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+        }
+    });
+
+    // --- Mouse Handling ---
+    function getGridPos(e) {
+        const rect = overlayCanvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const gridX = Math.floor((x / rect.width) * GRID_SIZE);
+        const gridY = Math.floor((y / rect.height) * GRID_SIZE);
+        return { x: gridX, y: gridY };
+    }
+
+    overlayCanvas.addEventListener("mousemove", (e) => {
+        if (!isStampActive) return;
+        const pos = getGridPos(e);
+        mouseX = pos.x;
+        mouseY = pos.y;
+
+        overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+        const pattern = patterns[currentPatternIndex];
+        const pixelW = overlayCanvas.width / GRID_SIZE;
+        const pixelH = overlayCanvas.height / GRID_SIZE;
+
+        overlayCtx.fillStyle = "rgba(255, 255, 255, 0.5)";
+
+        for (let py = 0; py < pattern.h; py++) {
+            for (let px = 0; px < pattern.w; px++) {
+                if (pattern.data[py * pattern.w + px] === 1) {
+                    overlayCtx.fillRect(
+                        (mouseX + px) * pixelW,
+                        (mouseY + py) * pixelH,
+                        pixelW,
+                        pixelH
+                    );
+                }
+            }
+        }
+    });
+
+    overlayCanvas.addEventListener("click", (e) => {
+        if (!isStampActive) return;
+        const pos = getGridPos(e);
+        const pattern = patterns[currentPatternIndex];
+
+        const patternArray = new Uint32Array(pattern.data);
+        device.queue.writeBuffer(patternDataBuffer, 0, patternArray);
+
+        device.queue.writeBuffer(stampUniformBuffer, 0, new Int32Array([pos.x, pos.y, pattern.w, pattern.h]));
+
+        const commandEncoder = device.createCommandEncoder();
+        const pass = commandEncoder.beginComputePass();
+        pass.setPipeline(stampPipeline);
+        pass.setBindGroup(0, useTextureA ? stampBindGroupA : stampBindGroupB);
+        pass.dispatchWorkgroups(Math.ceil(GRID_SIZE / WORKGROUP_SIZE), Math.ceil(GRID_SIZE / WORKGROUP_SIZE));
+        pass.end();
+
+        device.queue.submit([commandEncoder.finish()]);
+
+        useTextureA = !useTextureA;
+
+        if (!isPlaying) {
+            requestAnimationFrame(frame);
+        }
     });
 
     // --- UI Elements ---
@@ -171,13 +381,12 @@ async function init() {
     let frameCount = 0;
     let lastTime = performance.now();
     let generation = 0;
-    let useTextureA = true; // Input texture is A, Output is B
+    let useTextureA = true;
     let isPlaying = false;
-    let fpsInterval = 1000 / 12; // Default 12 FPS
+    let fpsInterval = 1000 / 12;
     let then = performance.now();
 
     // --- Initialization ---
-    // Start Blank
     const blankData = new Float32Array(GRID_SIZE * GRID_SIZE);
     blankData.fill(0.0);
 
@@ -188,17 +397,14 @@ async function init() {
             { bytesPerRow: GRID_SIZE * 4 },
             { width: GRID_SIZE, height: GRID_SIZE }
         );
-        // Also clear textureB to avoid artifacts if we switch before compute
         device.queue.writeTexture(
             { texture: textureB },
             data,
             { bytesPerRow: GRID_SIZE * 4 },
             { width: GRID_SIZE, height: GRID_SIZE }
         );
-        // Reset generation
         generation = 0;
         genElem.textContent = `Gen: ${generation}`;
-        // Reset to use Texture A as input
         useTextureA = true;
     }
 
@@ -223,8 +429,8 @@ async function init() {
         data.fill(0.0);
         const mid = Math.floor(GRID_SIZE / 2);
         for (let i = 0; i < GRID_SIZE; i++) {
-            data[mid * GRID_SIZE + i] = 2.0; // Horizontal
-            data[i * GRID_SIZE + mid] = 2.0; // Vertical
+            data[mid * GRID_SIZE + i] = 2.0;
+            data[i * GRID_SIZE + mid] = 2.0;
         }
         uploadData(data);
     });
@@ -233,7 +439,7 @@ async function init() {
         const data = new Float32Array(GRID_SIZE * GRID_SIZE);
         data.fill(0.0);
         const mid = Math.floor(GRID_SIZE / 2);
-        const r = 2; // 5x5 center means radius 2
+        const r = 2;
         for (let y = mid - r; y <= mid + r; y++) {
             for (let x = mid - r; x <= mid + r; x++) {
                 data[y * GRID_SIZE + x] = 2.0;
@@ -246,7 +452,7 @@ async function init() {
         const data = new Float32Array(GRID_SIZE * GRID_SIZE);
         const mid = GRID_SIZE / 2;
         const R = GRID_SIZE / 3;
-        const r_dot = R / 5; // Size of the small dots
+        const r_dot = R / 5;
 
         for (let y = 0; y < GRID_SIZE; y++) {
             for (let x = 0; x < GRID_SIZE; x++) {
@@ -255,34 +461,27 @@ async function init() {
                 const dist = Math.sqrt(dx * dx + dy * dy);
 
                 if (dist > R) {
-                    data[y * GRID_SIZE + x] = 2.0; // Chaos outside
+                    data[y * GRID_SIZE + x] = 2.0;
                     continue;
                 }
 
-                // Distances to centers of the two semi-circles/dots
-                // Top center (for negative dy)
                 const d_top = Math.sqrt(dx * dx + (dy + R / 2) ** 2);
-                // Bottom center (for positive dy)
                 const d_bot = Math.sqrt(dx * dx + (dy - R / 2) ** 2);
 
-                // Logic for Yin-Yang
-                // 1. Small dots (highest priority)
                 if (d_top < r_dot) {
-                    data[y * GRID_SIZE + x] = 4.0; // Always Alive dot in Dead section
+                    data[y * GRID_SIZE + x] = 4.0;
                 } else if (d_bot < r_dot) {
-                    data[y * GRID_SIZE + x] = 3.0; // Always Dead dot in Alive section
+                    data[y * GRID_SIZE + x] = 3.0;
                 }
-                // 2. Large semi-circles (create the S-curve)
                 else if (d_top < R / 2) {
-                    data[y * GRID_SIZE + x] = 0.0; // Dead bulge
+                    data[y * GRID_SIZE + x] = 0.0;
                 } else if (d_bot < R / 2) {
-                    data[y * GRID_SIZE + x] = 1.0; // Alive bulge
+                    data[y * GRID_SIZE + x] = 1.0;
                 }
-                // 3. Base halves
                 else if (dx > 0) {
-                    data[y * GRID_SIZE + x] = 1.0; // Right is Alive
+                    data[y * GRID_SIZE + x] = 1.0;
                 } else {
-                    data[y * GRID_SIZE + x] = 0.0; // Left is Dead
+                    data[y * GRID_SIZE + x] = 0.0;
                 }
             }
         }
@@ -334,6 +533,8 @@ async function init() {
         if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
             canvas.width = displayWidth;
             canvas.height = displayHeight;
+            overlayCanvas.width = displayWidth;
+            overlayCanvas.height = displayHeight;
         }
     }
     window.addEventListener('resize', resize);
@@ -346,31 +547,27 @@ async function init() {
         const now = performance.now();
         const elapsed = now - then;
 
-        // Update Time Uniform
         device.queue.writeBuffer(timeBuffer, 0, new Float32Array([now / 1000.0]));
 
-        // FPS Counter update (independent of cap)
         if (now - lastTime >= 1000) {
             fpsElem.textContent = `FPS: ${frameCount}`;
             frameCount = 0;
             lastTime = now;
         }
 
-        // FPS Cap Logic
         if (isPlaying && elapsed < fpsInterval) {
-            // Skip frame update if too fast
+            // Skip
         } else {
             if (isPlaying) {
                 then = now - (elapsed % fpsInterval);
                 generation++;
                 genElem.textContent = `Gen: ${generation}`;
-                frameCount++; // Count simulated frames
+                frameCount++;
             }
 
             const commandEncoder = device.createCommandEncoder();
 
             if (isPlaying) {
-                // 1. Compute Pass
                 const computePass = commandEncoder.beginComputePass();
                 computePass.setPipeline(computePipeline);
                 computePass.setBindGroup(0, useTextureA ? computeBindGroupA : computeBindGroupB);
@@ -378,12 +575,11 @@ async function init() {
                 computePass.end();
             }
 
-            // 2. Render Pass
             const textureView = context.getCurrentTexture().createView();
             const renderPass = commandEncoder.beginRenderPass({
                 colorAttachments: [{
                     view: textureView,
-                    clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1 }, // Clear to black, shader handles bg
+                    clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1 },
                     loadOp: "clear",
                     storeOp: "store",
                 }],

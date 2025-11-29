@@ -10,7 +10,10 @@
 
 <body>
     <div id="app">
-        <canvas id="gpuCanvas"></canvas>
+        <div class="canvas-container">
+            <canvas id="gpuCanvas"></canvas>
+            <canvas id="overlayCanvas"></canvas>
+        </div>
         <div class="overlay" id="overlay">
             <button id="toggleMenuBtn" class="toggle-btn" aria-label="Toggle Menu">−</button>
             <div class="menu-content" id="menuContent">
@@ -28,6 +31,18 @@
                 <div class="controls-row">
                     <label for="fpsCap">Max FPS:</label>
                     <input type="number" id="fpsCap" value="12" min="1" max="144">
+                </div>
+
+                <div class="separator"></div>
+
+                <div class="controls-row">
+                    <label>Stamp Tool:</label>
+                    <button id="stampToggleBtn">OFF</button>
+                </div>
+                <div id="stampControls" class="hidden">
+                    <div class="pattern-grid" id="patternGrid">
+                        <!-- Patterns will be injected here -->
+                    </div>
                 </div>
 
                 <div class="separator"></div>
