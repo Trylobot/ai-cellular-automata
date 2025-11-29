@@ -78,9 +78,9 @@ async function init() {
     });
 
     // --- Palette Buffer ---
-    // struct Palette { bg: vec4<f32>, fg: vec4<f32>, chaos: vec4<f32> }
-    // Size: 4 * 4 * 3 = 48 bytes
-    const paletteBufferSize = 48;
+    // struct Palette { bg: vec4<f32>, fg: vec4<f32>, chaos: vec4<f32>, alwaysDead: vec4<f32>, alwaysAlive: vec4<f32> }
+    // Size: 4 * 4 * 5 = 80 bytes
+    const paletteBufferSize = 80;
     const paletteBuffer = device.createBuffer({
         size: paletteBufferSize,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -93,16 +93,18 @@ async function init() {
         return [r, g, b, 1.0];
     }
 
-    function updatePalette(bgHex, fgHex, chaosHex) {
+    function updatePalette(bgHex, fgHex, chaosHex, alwaysDeadHex, alwaysAliveHex) {
         const bg = hexToRgb(bgHex);
         const fg = hexToRgb(fgHex);
         const chaos = hexToRgb(chaosHex);
-        const data = new Float32Array([...bg, ...fg, ...chaos]);
+        const alwaysDead = hexToRgb(alwaysDeadHex);
+        const alwaysAlive = hexToRgb(alwaysAliveHex);
+        const data = new Float32Array([...bg, ...fg, ...chaos, ...alwaysDead, ...alwaysAlive]);
         device.queue.writeBuffer(paletteBuffer, 0, data);
     }
 
     // Initial Palette (System Default)
-    updatePalette("#29AE93", "#00FFCC", "#FFA500");
+    updatePalette("#29AE93", "#00FFCC", "#FFA500", "#003300", "#CCFFCC");
 
     // --- Sampler for rendering ---
     const sampler = device.createSampler({
@@ -161,6 +163,8 @@ async function init() {
     const colorBgInput = document.getElementById("colorBg");
     const colorFgInput = document.getElementById("colorFg");
     const colorChaosInput = document.getElementById("colorChaos");
+    const colorAlwaysDeadInput = document.getElementById("colorAlwaysDead");
+    const colorAlwaysAliveInput = document.getElementById("colorAlwaysAlive");
     const systemPresetBtn = document.getElementById("systemPresetBtn");
 
     // --- State ---
@@ -264,9 +268,9 @@ async function init() {
                 // Logic for Yin-Yang
                 // 1. Small dots (highest priority)
                 if (d_top < r_dot) {
-                    data[y * GRID_SIZE + x] = 1.0; // Alive dot in Dead section
+                    data[y * GRID_SIZE + x] = 4.0; // Always Alive dot in Dead section
                 } else if (d_bot < r_dot) {
-                    data[y * GRID_SIZE + x] = 0.0; // Dead dot in Alive section
+                    data[y * GRID_SIZE + x] = 3.0; // Always Dead dot in Alive section
                 }
                 // 2. Large semi-circles (create the S-curve)
                 else if (d_top < R / 2) {
@@ -298,18 +302,28 @@ async function init() {
     });
 
     function handleColorChange() {
-        updatePalette(colorBgInput.value, colorFgInput.value, colorChaosInput.value);
+        updatePalette(
+            colorBgInput.value,
+            colorFgInput.value,
+            colorChaosInput.value,
+            colorAlwaysDeadInput.value,
+            colorAlwaysAliveInput.value
+        );
     }
 
     colorBgInput.addEventListener("input", handleColorChange);
     colorFgInput.addEventListener("input", handleColorChange);
     colorChaosInput.addEventListener("input", handleColorChange);
+    colorAlwaysDeadInput.addEventListener("input", handleColorChange);
+    colorAlwaysAliveInput.addEventListener("input", handleColorChange);
 
     systemPresetBtn.addEventListener("click", () => {
         colorBgInput.value = "#29AE93";
         colorFgInput.value = "#00FFCC";
         colorChaosInput.value = "#FFA500";
-        updatePalette("#29AE93", "#00FFCC", "#FFA500");
+        colorAlwaysDeadInput.value = "#003300";
+        colorAlwaysAliveInput.value = "#CCFFCC";
+        updatePalette("#29AE93", "#00FFCC", "#FFA500", "#003300", "#CCFFCC");
     });
 
     // --- Resize Handling ---

@@ -47,9 +47,20 @@ fn computeMain(@builtin(global_invocation_id) cell: vec3<u32>) {
 
     let currentState = textureLoad(cellStateIn, vec2<i32>(x, y), 0).r;
 
-    // If current cell is Chaos (State 2), it remains Chaos
-    if (currentState > 1.5) {
+    // Immutable States
+    // State 2: Chaos (Random)
+    if (currentState > 1.5 && currentState < 2.5) {
         textureStore(cellStateOut, vec2<i32>(x, y), vec4<f32>(2.0, 0.0, 0.0, 1.0));
+        return;
+    }
+    // State 3: Always Dead
+    if (currentState > 2.5 && currentState < 3.5) {
+        textureStore(cellStateOut, vec2<i32>(x, y), vec4<f32>(3.0, 0.0, 0.0, 1.0));
+        return;
+    }
+    // State 4: Always Alive
+    if (currentState > 3.5) {
+        textureStore(cellStateOut, vec2<i32>(x, y), vec4<f32>(4.0, 0.0, 0.0, 1.0));
         return;
     }
 
@@ -70,14 +81,17 @@ fn computeMain(@builtin(global_invocation_id) cell: vec3<u32>) {
             if (neighborState > 0.5 && neighborState < 1.5) {
                 // Normal Alive (State 1)
                 activeNeighbors++;
-            } else if (neighborState > 1.5) {
+            } else if (neighborState > 1.5 && neighborState < 2.5) {
                 // Chaos (State 2) - Randomly contributes 0 or 1
-                // Use position + time + loop index for seed
                 let seed = vec2<f32>(f32(nx) + time * 10.0, f32(ny) + f32(i * 3 + j));
                 if (rand(seed) > 0.5) {
                     activeNeighbors++;
                 }
+            } else if (neighborState > 3.5) {
+                // Always Alive (State 4) - Contributes 1
+                activeNeighbors++;
             }
+            // State 3 (Always Dead) contributes 0, so no check needed
         }
     }
 
@@ -104,6 +118,8 @@ struct Palette {
     bg: vec4<f32>,
     fg: vec4<f32>,
     chaos: vec4<f32>,
+    alwaysDead: vec4<f32>,
+    alwaysAlive: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> palette: Palette;
@@ -116,7 +132,11 @@ fn fragmentMain(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let state = textureLoad(cellTexture, coords, 0).r;
     
     var color = palette.bg;
-    if (state > 1.5) {
+    if (state > 3.5) {
+        color = palette.alwaysAlive;
+    } else if (state > 2.5) {
+        color = palette.alwaysDead;
+    } else if (state > 1.5) {
         color = palette.chaos;
     } else if (state > 0.5) {
         color = palette.fg;
