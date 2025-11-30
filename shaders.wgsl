@@ -231,13 +231,26 @@ struct Palette {
     alwaysAlive: vec4<f32>,
 };
 
+struct ViewUniforms {
+    offset: vec2<f32>,
+    scale: f32,
+    _pad: f32,
+};
+
 @group(0) @binding(0) var<uniform> palette: Palette;
 @group(0) @binding(3) var cellTexture: texture_2d<f32>;
+@group(0) @binding(6) var<uniform> view: ViewUniforms;
 
 @fragment
 fn fragmentMain(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    let size = textureDimensions(cellTexture);
-    let coords = vec2<i32>(uv * vec2<f32>(size));
+    let size = vec2<f32>(textureDimensions(cellTexture));
+    
+    // Transform UV for Zoom/Pan
+    // world_uv = (uv / scale) - offset
+    // We use fract() to handle infinite wrapping
+    let world_uv = fract((uv / view.scale) - view.offset);
+    
+    let coords = vec2<i32>(world_uv * size);
     let state = textureLoad(cellTexture, coords, 0).r;
     
     var color = palette.bg;

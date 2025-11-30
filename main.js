@@ -83,6 +83,21 @@ async function init() {
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
+    // --- View Buffer (Zoom/Pan) ---
+    const viewUniformBuffer = device.createBuffer({
+        size: 16, // vec2 offset, f32 scale, f32 pad
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    let zoom = 1.0;
+    let panX = 0.0;
+    let panY = 0.0;
+
+    function updateViewUniforms() {
+        device.queue.writeBuffer(viewUniformBuffer, 0, new Float32Array([panX, panY, zoom, 0.0]));
+    }
+    updateViewUniforms();
+
     function hexToRgb(hex) {
         const r = parseInt(hex.slice(1, 3), 16) / 255;
         const g = parseInt(hex.slice(3, 5), 16) / 255;
@@ -127,6 +142,7 @@ async function init() {
         entries: [
             { binding: 0, resource: { buffer: paletteBuffer } },
             { binding: 3, resource: textureA.createView() },
+            { binding: 6, resource: { buffer: viewUniformBuffer } },
         ],
     });
 
@@ -135,6 +151,7 @@ async function init() {
         entries: [
             { binding: 0, resource: { buffer: paletteBuffer } },
             { binding: 3, resource: textureB.createView() },
+            { binding: 6, resource: { buffer: viewUniformBuffer } },
         ],
     });
 
@@ -289,52 +306,170 @@ async function init() {
         if (isStampActive) {
             overlayCanvas.style.pointerEvents = "auto";
         } else {
-            overlayCanvas.style.pointerEvents = "none";
-            overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+            // Keep auto for pan
+            overlayCanvas.style.pointerEvents = "auto";
         }
     });
 
-    // --- Mouse Handling ---
-    function getGridPos(e) {
+    // --- Mouse Handling (Zoom/Pan/Stamp) ---
+    let isDragging = false;
+    let lastMouseX = 0;
+    let lastMouseY = 0;
+
+    function getGridPos(clientX, clientY) {
         const rect = overlayCanvas.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const y = e.clientY - rect.top;
-        const gridX = Math.floor((x / rect.width) * GRID_SIZE);
-        const gridY = Math.floor((y / rect.height) * GRID_SIZE);
+        const x = clientX - rect.left;
+        const y = clientY - rect.top;
+
+        // Normalized screen coordinates (0..1)
+        const u = x / rect.width;
+        const v = y / rect.height;
+
+        // Transform to world coordinates (0..1 wrapping)
+        // world_uv = (uv / scale) - offset
+        let worldU = (u / zoom) - panX;
+        let worldV = (v / zoom) - panY;
+
+        // Handle wrapping for grid lookup
+        worldU = worldU - Math.floor(worldU);
+        worldV = worldV - Math.floor(worldV);
+
+        const gridX = Math.floor(worldU * GRID_SIZE);
+        const gridY = Math.floor(worldV * GRID_SIZE);
+
         return { x: gridX, y: gridY };
     }
 
-    overlayCanvas.addEventListener("mousemove", (e) => {
-        if (!isStampActive) return;
-        const pos = getGridPos(e);
+    overlayCanvas.addEventListener("wheel", (e) => {
+        e.preventDefault();
+
+        const rect = overlayCanvas.getBoundingClientRect();
+        const mouseU = (e.clientX - rect.left) / rect.width;
+        const mouseV = (e.clientY - rect.top) / rect.height;
+
+        const zoomFactor = 1.1;
+        const newZoom = e.deltaY < 0 ? zoom * zoomFactor : zoom / zoomFactor;
+
+        // Clamp zoom
+        if (newZoom < 0.5 || newZoom > 50.0) return;
+
+        // Adjust pan to keep mouse under the same point
+        // world_pos_before = (mouseU / zoom) - panX
+        // world_pos_after = (mouseU / newZoom) - newPanX
+        // We want world_pos_before == world_pos_after
+
+        // (mouseU / zoom) - panX = (mouseU / newZoom) - newPanX
+        // newPanX = (mouseU / newZoom) - (mouseU / zoom) + panX
+
+        panX = (mouseU / newZoom) - (mouseU / zoom) + panX;
+        panY = (mouseV / newZoom) - (mouseV / zoom) + panY;
+
+        zoom = newZoom;
+        updateViewUniforms();
+
+        // Redraw ghost if active
+        if (isStampActive) {
+            drawGhost(e.clientX, e.clientY);
+        }
+
+        if (!isPlaying) requestAnimationFrame(frame);
+    }, { passive: false });
+
+    overlayCanvas.addEventListener("mousedown", (e) => {
+        // Middle click or Space+Click for pan
+        if (e.button === 1 || (e.button === 0 && e.getModifierState("Space"))) {
+            isDragging = true;
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+            e.preventDefault(); // Prevent scroll cursor
+        } else if (e.button === 0 && isStampActive) {
+            // Stamp Click
+            handleStampClick(e);
+        }
+    });
+
+    window.addEventListener("mousemove", (e) => {
+        if (isDragging) {
+            const dx = e.clientX - lastMouseX;
+            const dy = e.clientY - lastMouseY;
+
+            const rect = overlayCanvas.getBoundingClientRect();
+
+            // Convert pixel delta to UV delta
+            // UV delta = pixel_delta / screen_size / zoom
+            // Note: pan is SUBTRACTED in shader, so we ADD here to move view opposite to drag?
+            // Wait, if I drag right, I want the world to move right.
+            // world_uv = (uv / scale) - offset
+            // If I increase offset, world_uv decreases (moves left).
+            // So to move world right, I need to DECREASE offset (pan).
+            // But wait, panX IS the offset.
+
+            panX += dx / rect.width / zoom;
+            panY += dy / rect.height / zoom;
+
+            updateViewUniforms();
+
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+
+            if (!isPlaying) requestAnimationFrame(frame);
+        }
+
+        if (isStampActive && !isDragging) {
+            drawGhost(e.clientX, e.clientY);
+        }
+    });
+
+    window.addEventListener("mouseup", () => {
+        isDragging = false;
+    });
+
+    function drawGhost(clientX, clientY) {
+        const pos = getGridPos(clientX, clientY);
         mouseX = pos.x;
         mouseY = pos.y;
 
         overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 
         const pattern = patterns[currentPatternIndex];
-        const pixelW = overlayCanvas.width / GRID_SIZE;
-        const pixelH = overlayCanvas.height / GRID_SIZE;
+
+        const rect = overlayCanvas.getBoundingClientRect();
+        const width = rect.width;
+        const height = rect.height;
+
+        // Calculate offset of grid (0,0) on screen
+        const originX = panX * zoom * width;
+        const originY = panY * zoom * height;
+
+        // Cell size in pixels
+        const cellW = (width / GRID_SIZE) * zoom;
+        const cellH = (height / GRID_SIZE) * zoom;
 
         overlayCtx.fillStyle = "rgba(255, 255, 255, 0.5)";
 
         for (let py = 0; py < pattern.h; py++) {
             for (let px = 0; px < pattern.w; px++) {
                 if (pattern.data[py * pattern.w + px] === 1) {
+                    // Let's just use the mouse position and snap it.
+                    // We know the cell size is `cellW`.
+                    // We know the grid offset is `originX % cellW`.
+
+                    const snapX = Math.floor((clientX - rect.left - originX) / cellW) * cellW + originX;
+                    const snapY = Math.floor((clientY - rect.top - originY) / cellH) * cellH + originY;
+
                     overlayCtx.fillRect(
-                        (mouseX + px) * pixelW,
-                        (mouseY + py) * pixelH,
-                        pixelW,
-                        pixelH
+                        snapX + px * cellW,
+                        snapY + py * cellH,
+                        cellW,
+                        cellH
                     );
                 }
             }
         }
-    });
+    }
 
-    overlayCanvas.addEventListener("click", (e) => {
-        if (!isStampActive) return;
-        const pos = getGridPos(e);
+    function handleStampClick(e) {
+        const pos = getGridPos(e.clientX, e.clientY);
         const pattern = patterns[currentPatternIndex];
 
         const patternArray = new Uint32Array(pattern.data);
@@ -356,7 +491,7 @@ async function init() {
         if (!isPlaying) {
             requestAnimationFrame(frame);
         }
-    });
+    }
 
     // --- UI Elements ---
     const fpsElem = document.getElementById("fps");
