@@ -222,6 +222,51 @@ fn stampMain(@builtin(global_invocation_id) cell: vec3<u32>) {
     textureStore(cellStateOut, vec2<i32>(x, y), vec4<f32>(nextState, 0.0, 0.0, 1.0));
 }
 
+// --- History / Trails Shader ---
+
+struct HistoryUniforms {
+    decay: f32,
+    isActive: f32, // 0.0 or 1.0
+    _pad1: f32,
+    _pad2: f32,
+};
+
+@group(0) @binding(7) var<uniform> historyUniforms: HistoryUniforms;
+@group(0) @binding(8) var historyIn: texture_2d<f32>;
+@group(0) @binding(9) var historyOut: texture_storage_2d<r32float, write>;
+
+@compute @workgroup_size(8, 8)
+fn historyMain(@builtin(global_invocation_id) cell: vec3<u32>) {
+    let x = i32(cell.x);
+    let y = i32(cell.y);
+    let size = textureDimensions(cellStateIn);
+    let width = i32(size.x);
+    let height = i32(size.y);
+
+    if (x >= width || y >= height) {
+        return;
+    }
+
+    let currentState = textureLoad(cellStateIn, vec2<i32>(x, y), 0).r;
+    let oldHistory = textureLoad(historyIn, vec2<i32>(x, y), 0).r;
+    
+    var newHistory = oldHistory * historyUniforms.decay;
+    
+    // If cell is Alive (1) or Always Alive (4), boost history to 1.0
+    if (currentState > 0.5 && currentState < 1.5) {
+        newHistory = 1.0;
+    } else if (currentState > 3.5) {
+        newHistory = 1.0;
+    }
+    
+    // If trails are inactive, just clear history (or keep it but don't add to it? Let's clear/decay)
+    if (historyUniforms.isActive < 0.5) {
+        newHistory = 0.0;
+    }
+
+    textureStore(historyOut, vec2<i32>(x, y), vec4<f32>(newHistory, 0.0, 0.0, 1.0));
+}
+
 // Fragment Shader
 struct Palette {
     bg: vec4<f32>,
@@ -240,24 +285,40 @@ struct ViewUniforms {
 @group(0) @binding(0) var<uniform> palette: Palette;
 @group(0) @binding(3) var cellTexture: texture_2d<f32>;
 @group(0) @binding(6) var<uniform> view: ViewUniforms;
+@group(0) @binding(8) var historyTexture: texture_2d<f32>; // Re-use binding 8 for reading in fragment
 
 @fragment
 fn fragmentMain(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let size = vec2<f32>(textureDimensions(cellTexture));
     
     // Transform UV for Zoom/Pan
-    // world_uv = (uv / scale) - offset
-    // We use fract() to handle infinite wrapping
     let world_uv = fract((uv / view.scale) - view.offset);
     
     let coords = vec2<i32>(world_uv * size);
     let state = textureLoad(cellTexture, coords, 0).r;
+    let history = textureLoad(historyTexture, coords, 0).r;
     
     var color = palette.bg;
+    
+    // Blend history into background if cell is dead
+    if (state < 0.5 || (state > 2.5 && state < 3.5)) {
+        // Dead or Always Dead
+        // Simple additive blend of history color (using FG color for trail)
+        // or a specific trail color? Let's use FG color faded.
+        color = mix(palette.bg, palette.fg, history * 0.5); // Max 50% opacity for trails
+        
+        if (state > 2.5) {
+             // If Always Dead, maybe mix with that instead?
+             color = mix(palette.alwaysDead, palette.fg, history * 0.3);
+        }
+    }
+    
     if (state > 3.5) {
         color = palette.alwaysAlive;
     } else if (state > 2.5) {
-        color = palette.alwaysDead;
+        // Already handled above for blending, but if we want strict priority:
+        // color = palette.alwaysDead; 
+        // We let the blend happen above.
     } else if (state > 1.5) {
         color = palette.chaos;
     } else if (state > 0.5) {

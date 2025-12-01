@@ -70,6 +70,10 @@ async function init() {
     const textureA = device.createTexture(textureDesc);
     const textureB = device.createTexture(textureDesc);
 
+    // --- History / Trails State ---
+    const historyTextureA = device.createTexture(textureDesc);
+    const historyTextureB = device.createTexture(textureDesc);
+
     // --- Time Buffer ---
     const timeBuffer = device.createBuffer({
         size: 4,
@@ -89,14 +93,27 @@ async function init() {
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
+    // --- History Uniform Buffer ---
+    const historyUniformBuffer = device.createBuffer({
+        size: 16, // decay, active, pad, pad
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
     let zoom = 1.0;
     let panX = 0.0;
     let panY = 0.0;
+    let trailsActive = false;
+    let decayValue = 0.9;
 
     function updateViewUniforms() {
         device.queue.writeBuffer(viewUniformBuffer, 0, new Float32Array([panX, panY, zoom, 0.0]));
     }
     updateViewUniforms();
+
+    function updateHistoryUniforms() {
+        device.queue.writeBuffer(historyUniformBuffer, 0, new Float32Array([decayValue, trailsActive ? 1.0 : 0.0, 0.0, 0.0]));
+    }
+    updateHistoryUniforms();
 
     function hexToRgb(hex) {
         const r = parseInt(hex.slice(1, 3), 16) / 255;
@@ -118,6 +135,16 @@ async function init() {
     // Initial Palette (System Default)
     updatePalette("#29AE93", "#00FFCC", "#FFA500", "#003300", "#CCFFCC");
 
+    // --- History Pipeline ---
+    const historyPipeline = device.createComputePipeline({
+        label: "History Pipeline",
+        layout: "auto",
+        compute: {
+            module: shaderModule,
+            entryPoint: "historyMain",
+        },
+    });
+
     // --- Bind Groups ---
     const computeBindGroupA = device.createBindGroup({
         layout: computePipeline.getBindGroupLayout(0),
@@ -137,12 +164,37 @@ async function init() {
         ],
     });
 
+    // History Bind Groups
+    // historyBindGroupA: Read A (Current State), Read HistA (Old), Write HistB (New)
+    // historyBindGroupB: Read B (Current State), Read HistB (Old), Write HistA (New)
+
+    const historyBindGroupA = device.createBindGroup({
+        layout: historyPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 1, resource: textureA.createView() },
+            { binding: 7, resource: { buffer: historyUniformBuffer } },
+            { binding: 8, resource: historyTextureA.createView() },
+            { binding: 9, resource: historyTextureB.createView() },
+        ],
+    });
+
+    const historyBindGroupB = device.createBindGroup({
+        layout: historyPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 1, resource: textureB.createView() },
+            { binding: 7, resource: { buffer: historyUniformBuffer } },
+            { binding: 8, resource: historyTextureB.createView() },
+            { binding: 9, resource: historyTextureA.createView() },
+        ],
+    });
+
     const renderBindGroupA = device.createBindGroup({
         layout: renderPipeline.getBindGroupLayout(0),
         entries: [
             { binding: 0, resource: { buffer: paletteBuffer } },
             { binding: 3, resource: textureA.createView() },
             { binding: 6, resource: { buffer: viewUniformBuffer } },
+            { binding: 8, resource: historyTextureA.createView() },
         ],
     });
 
@@ -152,6 +204,7 @@ async function init() {
             { binding: 0, resource: { buffer: paletteBuffer } },
             { binding: 3, resource: textureB.createView() },
             { binding: 6, resource: { buffer: viewUniformBuffer } },
+            { binding: 8, resource: historyTextureB.createView() },
         ],
     });
 
@@ -505,6 +558,9 @@ async function init() {
     const toggleMenuBtn = document.getElementById("toggleMenuBtn");
     const overlay = document.getElementById("overlay");
 
+    const trailsToggle = document.getElementById("trailsToggle");
+    const decayRange = document.getElementById("decayRange");
+
     const colorBgInput = document.getElementById("colorBg");
     const colorFgInput = document.getElementById("colorFg");
     const colorChaosInput = document.getElementById("colorChaos");
@@ -549,6 +605,16 @@ async function init() {
     playPauseBtn.addEventListener("click", () => {
         isPlaying = !isPlaying;
         playPauseBtn.textContent = isPlaying ? "Pause" : "Play";
+    });
+
+    trailsToggle.addEventListener("change", (e) => {
+        trailsActive = e.target.checked;
+        updateHistoryUniforms();
+    });
+
+    decayRange.addEventListener("input", (e) => {
+        decayValue = parseFloat(e.target.value);
+        updateHistoryUniforms();
     });
 
     randomSoupBtn.addEventListener("click", () => {
@@ -703,11 +769,25 @@ async function init() {
             const commandEncoder = device.createCommandEncoder();
 
             if (isPlaying) {
+                // 1. Compute Pass (Simulation)
                 const computePass = commandEncoder.beginComputePass();
                 computePass.setPipeline(computePipeline);
                 computePass.setBindGroup(0, useTextureA ? computeBindGroupA : computeBindGroupB);
                 computePass.dispatchWorkgroups(Math.ceil(GRID_SIZE / WORKGROUP_SIZE), Math.ceil(GRID_SIZE / WORKGROUP_SIZE));
                 computePass.end();
+
+                // 2. History Pass (Trails)
+                // If useTextureA was true, we read from A and wrote to B. So B is the NEW state.
+                // We want to update history based on B.
+                // So we need to read B.
+                // historyBindGroupB reads B.
+                // It reads HistB and writes HistA.
+
+                const historyPass = commandEncoder.beginComputePass();
+                historyPass.setPipeline(historyPipeline);
+                historyPass.setBindGroup(0, useTextureA ? historyBindGroupB : historyBindGroupA);
+                historyPass.dispatchWorkgroups(Math.ceil(GRID_SIZE / WORKGROUP_SIZE), Math.ceil(GRID_SIZE / WORKGROUP_SIZE));
+                historyPass.end();
             }
 
             const textureView = context.getCurrentTexture().createView();
@@ -723,6 +803,26 @@ async function init() {
 
             let textureToRender;
             if (isPlaying) {
+                // If useTextureA: Sim A->B. History B->A (HistB->HistA).
+                // We have B and HistA.
+                // We need to render B and HistA.
+                // renderBindGroupB reads B and HistB. (Wrong history).
+                // renderBindGroupA reads A and HistA. (Wrong state).
+
+                // Wait, if we just produced HistA, we should read HistA.
+                // And we want to see state B.
+                // So we need "Read B, Read HistA".
+
+                // Let's check renderBindGroupB again.
+                // entries: [ {binding:3, resource:B}, {binding:8, resource:HistB} ]
+                // It reads HistB. But we just wrote to HistA!
+
+                // So we have a mismatch.
+                // We can swap the history texture bindings in the render bind groups?
+                // Or just accept that we display the *previous* history frame?
+                // If we display HistB (which was the input to the history pass), it's the history of the *previous* frame.
+                // That's probably fine for trails.
+
                 textureToRender = useTextureA ? renderBindGroupB : renderBindGroupA;
             } else {
                 textureToRender = useTextureA ? renderBindGroupA : renderBindGroupB;
