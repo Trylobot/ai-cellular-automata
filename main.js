@@ -1,5 +1,5 @@
-const GRID_SIZE = 256;
-const WORKGROUP_SIZE = 8;
+let gridSize = 256;
+const WORKGROUP_SIZE = 16;
 
 async function init() {
     if (!navigator.gpu) {
@@ -13,7 +13,14 @@ async function init() {
         return;
     }
 
-    const device = await adapter.requestDevice();
+    const requiredFeatures = [];
+    if (adapter.features.has('timestamp-query')) {
+        requiredFeatures.push('timestamp-query');
+    }
+
+    const device = await adapter.requestDevice({
+        requiredFeatures: requiredFeatures
+    });
 
     const canvas = document.getElementById("gpuCanvas");
     const context = canvas.getContext("webgpu");
@@ -25,12 +32,35 @@ async function init() {
         alphaMode: "premultiplied",
     });
 
+    // --- Profiling Setup ---
+    const canProfile = device.features.has('timestamp-query');
+    let querySet;
+    let queryResolveBuffer;
+    let queryResultBuffer;
+
+    if (canProfile) {
+        querySet = device.createQuerySet({
+            type: "timestamp",
+            count: 4,
+        });
+
+        queryResolveBuffer = device.createBuffer({
+            size: 4 * 8,
+            usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+        });
+
+        queryResultBuffer = device.createBuffer({
+            size: 4 * 8,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+    }
+
     const shaderModule = device.createShaderModule({
         label: "Cellular Automata Shaders",
         code: await (await fetch("./shaders.wgsl")).text(),
     });
 
-    // --- Compute Pipeline ---
+    // --- Pipelines ---
     const computePipeline = device.createComputePipeline({
         label: "Compute Pipeline",
         layout: "auto",
@@ -40,7 +70,6 @@ async function init() {
         },
     });
 
-    // --- Render Pipeline ---
     const renderPipeline = device.createRenderPipeline({
         label: "Render Pipeline",
         layout: "auto",
@@ -58,52 +87,180 @@ async function init() {
         },
     });
 
-    // --- Textures & Buffers ---
-    const textureDesc = {
-        size: [GRID_SIZE, GRID_SIZE],
-        format: "r32float",
-        usage: GPUTextureUsage.TEXTURE_BINDING |
-            GPUTextureUsage.STORAGE_BINDING |
-            GPUTextureUsage.COPY_DST,
-    };
+    const historyPipeline = device.createComputePipeline({
+        label: "History Pipeline",
+        layout: "auto",
+        compute: {
+            module: shaderModule,
+            entryPoint: "historyMain",
+        },
+    });
 
-    const textureA = device.createTexture(textureDesc);
-    const textureB = device.createTexture(textureDesc);
+    const stampPipeline = device.createComputePipeline({
+        label: "Stamp Pipeline",
+        layout: "auto",
+        compute: {
+            module: shaderModule,
+            entryPoint: "stampMain",
+        },
+    });
 
-    // --- History / Trails State ---
-    const historyTextureA = device.createTexture(textureDesc);
-    const historyTextureB = device.createTexture(textureDesc);
-
-    // --- Time Buffer ---
+    // --- Buffers (Size Independent) ---
     const timeBuffer = device.createBuffer({
         size: 4,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    // --- Palette Buffer ---
-    const paletteBufferSize = 80;
+    const paletteBufferSize = 96;
     const paletteBuffer = device.createBuffer({
         size: paletteBufferSize,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    // --- View Buffer (Zoom/Pan) ---
     const viewUniformBuffer = device.createBuffer({
-        size: 16, // vec2 offset, f32 scale, f32 pad
+        size: 16,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    // --- History Uniform Buffer ---
     const historyUniformBuffer = device.createBuffer({
-        size: 16, // decay, active, pad, pad
+        size: 16,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+
+    const stampUniformBuffer = device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const patternDataBuffer = device.createBuffer({
+        size: 1024,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    // --- Dynamic Resources ---
+    let textureA, textureB;
+    let historyTextureA, historyTextureB;
+    let computeBindGroupA, computeBindGroupB;
+    let historyBindGroupA, historyBindGroupB;
+    let renderBindGroupA, renderBindGroupB;
+    let stampBindGroupA, stampBindGroupB;
+
+    function initSimulationResources(size) {
+        gridSize = size;
+
+        if (textureA) textureA.destroy();
+        if (textureB) textureB.destroy();
+        if (historyTextureA) historyTextureA.destroy();
+        if (historyTextureB) historyTextureB.destroy();
+
+        const textureDesc = {
+            size: [gridSize, gridSize],
+            format: "r32float",
+            usage: GPUTextureUsage.TEXTURE_BINDING |
+                GPUTextureUsage.STORAGE_BINDING |
+                GPUTextureUsage.COPY_DST |
+                GPUTextureUsage.COPY_SRC,
+        };
+
+        textureA = device.createTexture(textureDesc);
+        textureB = device.createTexture(textureDesc);
+        historyTextureA = device.createTexture(textureDesc);
+        historyTextureB = device.createTexture(textureDesc);
+
+        // --- Bind Groups ---
+        computeBindGroupA = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 1, resource: textureA.createView() },
+                { binding: 2, resource: textureB.createView() },
+                { binding: 3, resource: { buffer: timeBuffer } },
+            ],
+        });
+
+        computeBindGroupB = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 1, resource: textureB.createView() },
+                { binding: 2, resource: textureA.createView() },
+                { binding: 3, resource: { buffer: timeBuffer } },
+            ],
+        });
+
+        historyBindGroupA = device.createBindGroup({
+            layout: historyPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 1, resource: textureA.createView() },
+                { binding: 7, resource: { buffer: historyUniformBuffer } },
+                { binding: 8, resource: historyTextureA.createView() },
+                { binding: 9, resource: historyTextureB.createView() },
+            ],
+        });
+
+        historyBindGroupB = device.createBindGroup({
+            layout: historyPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 1, resource: textureB.createView() },
+                { binding: 7, resource: { buffer: historyUniformBuffer } },
+                { binding: 8, resource: historyTextureB.createView() },
+                { binding: 9, resource: historyTextureA.createView() },
+            ],
+        });
+
+        renderBindGroupA = device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: paletteBuffer } },
+                { binding: 3, resource: textureA.createView() },
+                { binding: 6, resource: { buffer: viewUniformBuffer } },
+                { binding: 8, resource: historyTextureA.createView() },
+            ],
+        });
+
+        renderBindGroupB = device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: paletteBuffer } },
+                { binding: 3, resource: textureB.createView() },
+                { binding: 6, resource: { buffer: viewUniformBuffer } },
+                { binding: 8, resource: historyTextureB.createView() },
+            ],
+        });
+
+        stampBindGroupA = device.createBindGroup({
+            layout: stampPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 1, resource: textureA.createView() },
+                { binding: 2, resource: textureB.createView() },
+                { binding: 4, resource: { buffer: stampUniformBuffer } },
+                { binding: 5, resource: { buffer: patternDataBuffer } },
+            ],
+        });
+
+        stampBindGroupB = device.createBindGroup({
+            layout: stampPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 1, resource: textureB.createView() },
+                { binding: 2, resource: textureA.createView() },
+                { binding: 4, resource: { buffer: stampUniformBuffer } },
+                { binding: 5, resource: { buffer: patternDataBuffer } },
+            ],
+        });
+
+        generation = 0;
+        genElem.textContent = `Gen: ${generation}`;
+        useTextureA = true;
+
+        const blankData = new Float32Array(gridSize * gridSize);
+        blankData.fill(0.0);
+        uploadData(blankData);
+    }
 
     let zoom = 1.0;
     let panX = 0.0;
     let panY = 0.0;
     let trailsActive = false;
     let decayValue = 0.9;
+    let statsEnabled = false;
 
     function updateViewUniforms() {
         device.queue.writeBuffer(viewUniformBuffer, 0, new Float32Array([panX, panY, zoom, 0.0]));
@@ -122,91 +279,19 @@ async function init() {
         return [r, g, b, 1.0];
     }
 
-    function updatePalette(bgHex, fgHex, chaosHex, alwaysDeadHex, alwaysAliveHex) {
+    function updatePalette(bgHex, fgHex, chaosHex, alwaysDeadHex, alwaysAliveHex, trailHex) {
         const bg = hexToRgb(bgHex);
         const fg = hexToRgb(fgHex);
         const chaos = hexToRgb(chaosHex);
         const alwaysDead = hexToRgb(alwaysDeadHex);
         const alwaysAlive = hexToRgb(alwaysAliveHex);
-        const data = new Float32Array([...bg, ...fg, ...chaos, ...alwaysDead, ...alwaysAlive]);
+        const trail = hexToRgb(trailHex);
+
+        const data = new Float32Array([...bg, ...fg, ...chaos, ...alwaysDead, ...alwaysAlive, ...trail]);
         device.queue.writeBuffer(paletteBuffer, 0, data);
     }
 
-    // Initial Palette (System Default)
-    updatePalette("#29AE93", "#00FFCC", "#FFA500", "#003300", "#CCFFCC");
-
-    // --- History Pipeline ---
-    const historyPipeline = device.createComputePipeline({
-        label: "History Pipeline",
-        layout: "auto",
-        compute: {
-            module: shaderModule,
-            entryPoint: "historyMain",
-        },
-    });
-
-    // --- Bind Groups ---
-    const computeBindGroupA = device.createBindGroup({
-        layout: computePipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 1, resource: textureA.createView() },
-            { binding: 2, resource: textureB.createView() },
-            { binding: 3, resource: { buffer: timeBuffer } },
-        ],
-    });
-
-    const computeBindGroupB = device.createBindGroup({
-        layout: computePipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 1, resource: textureB.createView() },
-            { binding: 2, resource: textureA.createView() },
-            { binding: 3, resource: { buffer: timeBuffer } },
-        ],
-    });
-
-    // History Bind Groups
-    // historyBindGroupA: Read A (Current State), Read HistA (Old), Write HistB (New)
-    // historyBindGroupB: Read B (Current State), Read HistB (Old), Write HistA (New)
-
-    const historyBindGroupA = device.createBindGroup({
-        layout: historyPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 1, resource: textureA.createView() },
-            { binding: 7, resource: { buffer: historyUniformBuffer } },
-            { binding: 8, resource: historyTextureA.createView() },
-            { binding: 9, resource: historyTextureB.createView() },
-        ],
-    });
-
-    const historyBindGroupB = device.createBindGroup({
-        layout: historyPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 1, resource: textureB.createView() },
-            { binding: 7, resource: { buffer: historyUniformBuffer } },
-            { binding: 8, resource: historyTextureB.createView() },
-            { binding: 9, resource: historyTextureA.createView() },
-        ],
-    });
-
-    const renderBindGroupA = device.createBindGroup({
-        layout: renderPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: paletteBuffer } },
-            { binding: 3, resource: textureA.createView() },
-            { binding: 6, resource: { buffer: viewUniformBuffer } },
-            { binding: 8, resource: historyTextureA.createView() },
-        ],
-    });
-
-    const renderBindGroupB = device.createBindGroup({
-        layout: renderPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: paletteBuffer } },
-            { binding: 3, resource: textureB.createView() },
-            { binding: 6, resource: { buffer: viewUniformBuffer } },
-            { binding: 8, resource: historyTextureB.createView() },
-        ],
-    });
+    updatePalette("#29AE93", "#00FFCC", "#FFA500", "#003300", "#CCFFCC", "#FF00FF");
 
     // --- Patterns ---
     const patterns = [
@@ -263,46 +348,6 @@ async function init() {
     const overlayCanvas = document.getElementById("overlayCanvas");
     const overlayCtx = overlayCanvas.getContext("2d");
 
-    // --- Stamp Shader Bindings ---
-    const stampPipeline = device.createComputePipeline({
-        label: "Stamp Pipeline",
-        layout: "auto",
-        compute: {
-            module: shaderModule,
-            entryPoint: "stampMain",
-        },
-    });
-
-    const stampUniformBuffer = device.createBuffer({
-        size: 16,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-
-    const patternDataBuffer = device.createBuffer({
-        size: 1024,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-
-    const stampBindGroupA = device.createBindGroup({
-        layout: stampPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 1, resource: textureA.createView() },
-            { binding: 2, resource: textureB.createView() },
-            { binding: 4, resource: { buffer: stampUniformBuffer } },
-            { binding: 5, resource: { buffer: patternDataBuffer } },
-        ],
-    });
-
-    const stampBindGroupB = device.createBindGroup({
-        layout: stampPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 1, resource: textureB.createView() },
-            { binding: 2, resource: textureA.createView() },
-            { binding: 4, resource: { buffer: stampUniformBuffer } },
-            { binding: 5, resource: { buffer: patternDataBuffer } },
-        ],
-    });
-
     // --- Generate Icons ---
     function generatePatternIcon(pattern) {
         const iconCanvas = document.createElement("canvas");
@@ -331,6 +376,8 @@ async function init() {
     }
 
     function initStampUI() {
+        if (!patternGrid) return;
+        patternGrid.innerHTML = '';
         patterns.forEach((p, index) => {
             const btn = document.createElement("div");
             btn.className = "pattern-btn";
@@ -359,7 +406,6 @@ async function init() {
         if (isStampActive) {
             overlayCanvas.style.pointerEvents = "auto";
         } else {
-            // Keep auto for pan
             overlayCanvas.style.pointerEvents = "auto";
         }
     });
@@ -374,21 +420,17 @@ async function init() {
         const x = clientX - rect.left;
         const y = clientY - rect.top;
 
-        // Normalized screen coordinates (0..1)
         const u = x / rect.width;
         const v = y / rect.height;
 
-        // Transform to world coordinates (0..1 wrapping)
-        // world_uv = (uv / scale) - offset
         let worldU = (u / zoom) - panX;
         let worldV = (v / zoom) - panY;
 
-        // Handle wrapping for grid lookup
         worldU = worldU - Math.floor(worldU);
         worldV = worldV - Math.floor(worldV);
 
-        const gridX = Math.floor(worldU * GRID_SIZE);
-        const gridY = Math.floor(worldV * GRID_SIZE);
+        const gridX = Math.floor(worldU * gridSize);
+        const gridY = Math.floor(worldV * gridSize);
 
         return { x: gridX, y: gridY };
     }
@@ -403,16 +445,7 @@ async function init() {
         const zoomFactor = 1.1;
         const newZoom = e.deltaY < 0 ? zoom * zoomFactor : zoom / zoomFactor;
 
-        // Clamp zoom
         if (newZoom < 0.5 || newZoom > 50.0) return;
-
-        // Adjust pan to keep mouse under the same point
-        // world_pos_before = (mouseU / zoom) - panX
-        // world_pos_after = (mouseU / newZoom) - newPanX
-        // We want world_pos_before == world_pos_after
-
-        // (mouseU / zoom) - panX = (mouseU / newZoom) - newPanX
-        // newPanX = (mouseU / newZoom) - (mouseU / zoom) + panX
 
         panX = (mouseU / newZoom) - (mouseU / zoom) + panX;
         panY = (mouseV / newZoom) - (mouseV / zoom) + panY;
@@ -420,7 +453,6 @@ async function init() {
         zoom = newZoom;
         updateViewUniforms();
 
-        // Redraw ghost if active
         if (isStampActive) {
             drawGhost(e.clientX, e.clientY);
         }
@@ -429,14 +461,12 @@ async function init() {
     }, { passive: false });
 
     overlayCanvas.addEventListener("mousedown", (e) => {
-        // Middle click or Space+Click for pan
         if (e.button === 1 || (e.button === 0 && e.getModifierState("Space"))) {
             isDragging = true;
             lastMouseX = e.clientX;
             lastMouseY = e.clientY;
-            e.preventDefault(); // Prevent scroll cursor
+            e.preventDefault();
         } else if (e.button === 0 && isStampActive) {
-            // Stamp Click
             handleStampClick(e);
         }
     });
@@ -445,17 +475,7 @@ async function init() {
         if (isDragging) {
             const dx = e.clientX - lastMouseX;
             const dy = e.clientY - lastMouseY;
-
             const rect = overlayCanvas.getBoundingClientRect();
-
-            // Convert pixel delta to UV delta
-            // UV delta = pixel_delta / screen_size / zoom
-            // Note: pan is SUBTRACTED in shader, so we ADD here to move view opposite to drag?
-            // Wait, if I drag right, I want the world to move right.
-            // world_uv = (uv / scale) - offset
-            // If I increase offset, world_uv decreases (moves left).
-            // So to move world right, I need to DECREASE offset (pan).
-            // But wait, panX IS the offset.
 
             panX += dx / rect.width / zoom;
             panY += dy / rect.height / zoom;
@@ -490,23 +510,17 @@ async function init() {
         const width = rect.width;
         const height = rect.height;
 
-        // Calculate offset of grid (0,0) on screen
         const originX = panX * zoom * width;
         const originY = panY * zoom * height;
 
-        // Cell size in pixels
-        const cellW = (width / GRID_SIZE) * zoom;
-        const cellH = (height / GRID_SIZE) * zoom;
+        const cellW = (width / gridSize) * zoom;
+        const cellH = (height / gridSize) * zoom;
 
         overlayCtx.fillStyle = "rgba(255, 255, 255, 0.5)";
 
         for (let py = 0; py < pattern.h; py++) {
             for (let px = 0; px < pattern.w; px++) {
                 if (pattern.data[py * pattern.w + px] === 1) {
-                    // Let's just use the mouse position and snap it.
-                    // We know the cell size is `cellW`.
-                    // We know the grid offset is `originX % cellW`.
-
                     const snapX = Math.floor((clientX - rect.left - originX) / cellW) * cellW + originX;
                     const snapY = Math.floor((clientY - rect.top - originY) / cellH) * cellH + originY;
 
@@ -531,10 +545,20 @@ async function init() {
         device.queue.writeBuffer(stampUniformBuffer, 0, new Int32Array([pos.x, pos.y, pattern.w, pattern.h]));
 
         const commandEncoder = device.createCommandEncoder();
+
+        const src = useTextureA ? textureA : textureB;
+        const dst = useTextureA ? textureB : textureA;
+
+        commandEncoder.copyTextureToTexture(
+            { texture: src },
+            { texture: dst },
+            [gridSize, gridSize]
+        );
+
         const pass = commandEncoder.beginComputePass();
         pass.setPipeline(stampPipeline);
         pass.setBindGroup(0, useTextureA ? stampBindGroupA : stampBindGroupB);
-        pass.dispatchWorkgroups(Math.ceil(GRID_SIZE / WORKGROUP_SIZE), Math.ceil(GRID_SIZE / WORKGROUP_SIZE));
+        pass.dispatchWorkgroups(Math.ceil(pattern.w / WORKGROUP_SIZE), Math.ceil(pattern.h / WORKGROUP_SIZE));
         pass.end();
 
         device.queue.submit([commandEncoder.finish()]);
@@ -560,12 +584,15 @@ async function init() {
 
     const trailsToggle = document.getElementById("trailsToggle");
     const decayRange = document.getElementById("decayRange");
+    const statsToggle = document.getElementById("statsToggle");
+    const gridSizeSelect = document.getElementById("gridSizeSelect");
 
     const colorBgInput = document.getElementById("colorBg");
     const colorFgInput = document.getElementById("colorFg");
     const colorChaosInput = document.getElementById("colorChaos");
     const colorAlwaysDeadInput = document.getElementById("colorAlwaysDead");
     const colorAlwaysAliveInput = document.getElementById("colorAlwaysAlive");
+    const colorTrailInput = document.getElementById("colorTrail");
     const systemPresetBtn = document.getElementById("systemPresetBtn");
 
     // --- State ---
@@ -577,29 +604,23 @@ async function init() {
     let fpsInterval = 1000 / 12;
     let then = performance.now();
 
-    // --- Initialization ---
-    const blankData = new Float32Array(GRID_SIZE * GRID_SIZE);
-    blankData.fill(0.0);
-
     function uploadData(data) {
         device.queue.writeTexture(
             { texture: textureA },
             data,
-            { bytesPerRow: GRID_SIZE * 4 },
-            { width: GRID_SIZE, height: GRID_SIZE }
+            { bytesPerRow: gridSize * 4 },
+            { width: gridSize, height: gridSize }
         );
         device.queue.writeTexture(
             { texture: textureB },
             data,
-            { bytesPerRow: GRID_SIZE * 4 },
-            { width: GRID_SIZE, height: GRID_SIZE }
+            { bytesPerRow: gridSize * 4 },
+            { width: gridSize, height: gridSize }
         );
         generation = 0;
         genElem.textContent = `Gen: ${generation}`;
         useTextureA = true;
     }
-
-    uploadData(blankData);
 
     // --- Event Listeners ---
     playPauseBtn.addEventListener("click", () => {
@@ -617,52 +638,68 @@ async function init() {
         updateHistoryUniforms();
     });
 
+    statsToggle.addEventListener("change", (e) => {
+        statsEnabled = e.target.checked;
+        if (!statsEnabled) {
+            fpsElem.textContent = `FPS: ${frameCount}`;
+        }
+    });
+
+    gridSizeSelect.addEventListener("change", (e) => {
+        const newSize = parseInt(e.target.value);
+        initSimulationResources(newSize);
+        zoom = 1.0;
+        panX = 0.0;
+        panY = 0.0;
+        updateViewUniforms();
+    });
+
     randomSoupBtn.addEventListener("click", () => {
-        const data = new Float32Array(GRID_SIZE * GRID_SIZE);
-        for (let i = 0; i < GRID_SIZE * GRID_SIZE; i++) {
+        const data = new Float32Array(gridSize * gridSize);
+        for (let i = 0; i < gridSize * gridSize; i++) {
             data[i] = Math.random() > 0.5 ? 1.0 : 0.0;
         }
         uploadData(data);
     });
 
     crossBtn.addEventListener("click", () => {
-        const data = new Float32Array(GRID_SIZE * GRID_SIZE);
+        const data = new Float32Array(gridSize * gridSize);
         data.fill(0.0);
-        const mid = Math.floor(GRID_SIZE / 2);
-        for (let i = 0; i < GRID_SIZE; i++) {
-            data[mid * GRID_SIZE + i] = 2.0;
-            data[i * GRID_SIZE + mid] = 2.0;
+        const mid = Math.floor(gridSize / 2);
+        for (let i = 0; i < gridSize; i++) {
+            data[mid * gridSize + i] = 2.0;
+            data[i * gridSize + mid] = 2.0;
         }
         uploadData(data);
     });
 
     dotBtn.addEventListener("click", () => {
-        const data = new Float32Array(GRID_SIZE * GRID_SIZE);
+        const data = new Float32Array(gridSize * gridSize);
         data.fill(0.0);
-        const mid = Math.floor(GRID_SIZE / 2);
+        const mid = Math.floor(gridSize / 2);
         const r = 2;
         for (let y = mid - r; y <= mid + r; y++) {
             for (let x = mid - r; x <= mid + r; x++) {
-                data[y * GRID_SIZE + x] = 2.0;
+                data[y * gridSize + x] = 2.0;
             }
         }
         uploadData(data);
     });
 
     yinYangBtn.addEventListener("click", () => {
-        const data = new Float32Array(GRID_SIZE * GRID_SIZE);
-        const mid = GRID_SIZE / 2;
-        const R = GRID_SIZE / 3;
+        const data = new Float32Array(gridSize * gridSize);
+        const mid = gridSize / 2;
+        const R = gridSize / 3;
         const r_dot = R / 5;
 
-        for (let y = 0; y < GRID_SIZE; y++) {
-            for (let x = 0; x < GRID_SIZE; x++) {
+        for (let y = 0; y < gridSize; y++) {
+            for (let x = 0; x < gridSize; x++) {
                 const dx = x - mid;
                 const dy = y - mid;
                 const dist = Math.sqrt(dx * dx + dy * dy);
 
                 if (dist > R) {
-                    data[y * GRID_SIZE + x] = 2.0;
+                    data[y * gridSize + x] = 2.0;
                     continue;
                 }
 
@@ -670,19 +707,19 @@ async function init() {
                 const d_bot = Math.sqrt(dx * dx + (dy - R / 2) ** 2);
 
                 if (d_top < r_dot) {
-                    data[y * GRID_SIZE + x] = 4.0;
+                    data[y * gridSize + x] = 4.0;
                 } else if (d_bot < r_dot) {
-                    data[y * GRID_SIZE + x] = 3.0;
+                    data[y * gridSize + x] = 3.0;
                 }
                 else if (d_top < R / 2) {
-                    data[y * GRID_SIZE + x] = 0.0;
+                    data[y * gridSize + x] = 0.0;
                 } else if (d_bot < R / 2) {
-                    data[y * GRID_SIZE + x] = 1.0;
+                    data[y * gridSize + x] = 1.0;
                 }
                 else if (dx > 0) {
-                    data[y * GRID_SIZE + x] = 1.0;
+                    data[y * gridSize + x] = 1.0;
                 } else {
-                    data[y * GRID_SIZE + x] = 0.0;
+                    data[y * gridSize + x] = 0.0;
                 }
             }
         }
@@ -707,7 +744,8 @@ async function init() {
             colorFgInput.value,
             colorChaosInput.value,
             colorAlwaysDeadInput.value,
-            colorAlwaysAliveInput.value
+            colorAlwaysAliveInput.value,
+            colorTrailInput.value
         );
     }
 
@@ -716,6 +754,7 @@ async function init() {
     colorChaosInput.addEventListener("input", handleColorChange);
     colorAlwaysDeadInput.addEventListener("input", handleColorChange);
     colorAlwaysAliveInput.addEventListener("input", handleColorChange);
+    colorTrailInput.addEventListener("input", handleColorChange);
 
     systemPresetBtn.addEventListener("click", () => {
         colorBgInput.value = "#29AE93";
@@ -723,7 +762,8 @@ async function init() {
         colorChaosInput.value = "#FFA500";
         colorAlwaysDeadInput.value = "#003300";
         colorAlwaysAliveInput.value = "#CCFFCC";
-        updatePalette("#29AE93", "#00FFCC", "#FFA500", "#003300", "#CCFFCC");
+        colorTrailInput.value = "#FF00FF";
+        updatePalette("#29AE93", "#00FFCC", "#FFA500", "#003300", "#CCFFCC", "#FF00FF");
     });
 
     // --- Resize Handling ---
@@ -751,7 +791,9 @@ async function init() {
         device.queue.writeBuffer(timeBuffer, 0, new Float32Array([now / 1000.0]));
 
         if (now - lastTime >= 1000) {
-            fpsElem.textContent = `FPS: ${frameCount}`;
+            if (!statsEnabled) {
+                fpsElem.textContent = `FPS: ${frameCount}`;
+            }
             frameCount = 0;
             lastTime = now;
         }
@@ -769,60 +811,60 @@ async function init() {
             const commandEncoder = device.createCommandEncoder();
 
             if (isPlaying) {
-                // 1. Compute Pass (Simulation)
-                const computePass = commandEncoder.beginComputePass();
+                // 1. Compute Pass
+                const computePassDescriptor = {
+                    layout: "auto",
+                    compute: {
+                        module: shaderModule,
+                        entryPoint: "computeMain",
+                    },
+                };
+
+                if (statsEnabled && canProfile) {
+                    computePassDescriptor.timestampWrites = {
+                        querySet: querySet,
+                        beginningOfPassWriteIndex: 0,
+                        endOfPassWriteIndex: 1,
+                    };
+                }
+
+                const computePass = commandEncoder.beginComputePass(computePassDescriptor);
                 computePass.setPipeline(computePipeline);
                 computePass.setBindGroup(0, useTextureA ? computeBindGroupA : computeBindGroupB);
-                computePass.dispatchWorkgroups(Math.ceil(GRID_SIZE / WORKGROUP_SIZE), Math.ceil(GRID_SIZE / WORKGROUP_SIZE));
+                computePass.dispatchWorkgroups(Math.ceil(gridSize / WORKGROUP_SIZE), Math.ceil(gridSize / WORKGROUP_SIZE));
                 computePass.end();
 
-                // 2. History Pass (Trails)
-                // If useTextureA was true, we read from A and wrote to B. So B is the NEW state.
-                // We want to update history based on B.
-                // So we need to read B.
-                // historyBindGroupB reads B.
-                // It reads HistB and writes HistA.
-
+                // 2. History Pass
                 const historyPass = commandEncoder.beginComputePass();
                 historyPass.setPipeline(historyPipeline);
                 historyPass.setBindGroup(0, useTextureA ? historyBindGroupB : historyBindGroupA);
-                historyPass.dispatchWorkgroups(Math.ceil(GRID_SIZE / WORKGROUP_SIZE), Math.ceil(GRID_SIZE / WORKGROUP_SIZE));
+                historyPass.dispatchWorkgroups(Math.ceil(gridSize / WORKGROUP_SIZE), Math.ceil(gridSize / WORKGROUP_SIZE));
                 historyPass.end();
             }
 
             const textureView = context.getCurrentTexture().createView();
-            const renderPass = commandEncoder.beginRenderPass({
+            const renderPassDescriptor = {
                 colorAttachments: [{
                     view: textureView,
                     clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1 },
                     loadOp: "clear",
                     storeOp: "store",
                 }],
-            });
+            };
+
+            if (statsEnabled && canProfile) {
+                renderPassDescriptor.timestampWrites = {
+                    querySet: querySet,
+                    beginningOfPassWriteIndex: 2,
+                    endOfPassWriteIndex: 3,
+                };
+            }
+
+            const renderPass = commandEncoder.beginRenderPass(renderPassDescriptor);
             renderPass.setPipeline(renderPipeline);
 
             let textureToRender;
             if (isPlaying) {
-                // If useTextureA: Sim A->B. History B->A (HistB->HistA).
-                // We have B and HistA.
-                // We need to render B and HistA.
-                // renderBindGroupB reads B and HistB. (Wrong history).
-                // renderBindGroupA reads A and HistA. (Wrong state).
-
-                // Wait, if we just produced HistA, we should read HistA.
-                // And we want to see state B.
-                // So we need "Read B, Read HistA".
-
-                // Let's check renderBindGroupB again.
-                // entries: [ {binding:3, resource:B}, {binding:8, resource:HistB} ]
-                // It reads HistB. But we just wrote to HistA!
-
-                // So we have a mismatch.
-                // We can swap the history texture bindings in the render bind groups?
-                // Or just accept that we display the *previous* history frame?
-                // If we display HistB (which was the input to the history pass), it's the history of the *previous* frame.
-                // That's probably fine for trails.
-
                 textureToRender = useTextureA ? renderBindGroupB : renderBindGroupA;
             } else {
                 textureToRender = useTextureA ? renderBindGroupA : renderBindGroupB;
@@ -832,13 +874,38 @@ async function init() {
             renderPass.draw(6);
             renderPass.end();
 
+            if (statsEnabled && canProfile) {
+                commandEncoder.resolveQuerySet(querySet, 0, 4, queryResolveBuffer, 0);
+                commandEncoder.copyBufferToBuffer(queryResolveBuffer, 0, queryResultBuffer, 0, 32);
+            }
+
             device.queue.submit([commandEncoder.finish()]);
+
+            if (statsEnabled && canProfile) {
+                if (queryResultBuffer.mapState === 'unmapped') {
+                    queryResultBuffer.mapAsync(GPUMapMode.READ).then(() => {
+                        const times = new BigInt64Array(queryResultBuffer.getMappedRange());
+
+                        let computeTime = 0;
+                        if (isPlaying) {
+                            computeTime = Number(times[1] - times[0]) / 1000000;
+                        }
+                        const renderTime = Number(times[3] - times[2]) / 1000000;
+
+                        fpsElem.textContent = `FPS: ${frameCount} | Comp: ${computeTime.toFixed(2)}ms | Rend: ${renderTime.toFixed(2)}ms`;
+
+                        queryResultBuffer.unmap();
+                    });
+                }
+            }
 
             if (isPlaying) {
                 useTextureA = !useTextureA;
             }
         }
     }
+
+    initSimulationResources(256);
 
     requestAnimationFrame(frame);
 }

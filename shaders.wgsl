@@ -33,7 +33,7 @@ fn rand(co: vec2<f32>) -> f32 {
     return fract(sin(dot(co, vec2<f32>(12.9898, 78.233))) * 43758.5453);
 }
 
-@compute @workgroup_size(8, 8)
+@compute @workgroup_size(16, 16)
 fn computeMain(@builtin(global_invocation_id) cell: vec3<u32>) {
     let x = i32(cell.x);
     let y = i32(cell.y);
@@ -121,112 +121,80 @@ struct StampUniforms {
 };
 
 @group(0) @binding(4) var<uniform> stampUniforms: StampUniforms;
-@group(0) @binding(5) var<storage, read> patternData: array<u32>; // Packed bits? Or just 0/1 ints? Let's use u32 0/1 for simplicity.
+@group(0) @binding(5) var<storage, read> patternData: array<u32>;
 
-@compute @workgroup_size(8, 8)
-fn stampKernel(@builtin(global_invocation_id) cell: vec3<u32>) {
-    let x = i32(cell.x);
-    let y = i32(cell.y);
-    
-    // We only need to run this for the size of the pattern
-    if (x >= stampUniforms.patternSize.x || y >= stampUniforms.patternSize.y) {
-        return;
-    }
-
-    let gridX = (stampUniforms.clickPos.x + x) % 256; // Hardcoded grid size for now, or pass it
-    let gridY = (stampUniforms.clickPos.y + y) % 256;
-    
-    // Handle negative wrapping if needed (though % usually handles positive)
-    let gx = select(gridX, gridX + 256, gridX < 0);
-    let gy = select(gridY, gridY + 256, gridY < 0);
-
-    let patternIndex = y * stampUniforms.patternSize.x + x;
-    let patternVal = patternData[patternIndex];
-
-    if (patternVal == 1u) {
-        // Flip logic
-        // Load current state from textureA (or whichever is current)
-        // Wait, we need to read/write to the SAME texture for a stamp, or ping-pong.
-        // For simplicity, let's assume we read from 'cellStateIn' and write to 'cellStateOut' 
-        // effectively copying the whole grid but modifying the stamped area.
-        // BUT, that requires running over the whole grid.
-        
-        // Better approach: The stamp kernel ONLY runs on the stamped area.
-        // It reads the current value, flips it, and writes it back.
-        // Storage textures support read-write in some tiers, but safe bet is:
-        // We are modifying the "current" state. 
-        // If we are paused, we can just modify the current texture.
-        // If we are playing, it might be tricky to stamp mid-frame.
-        // Let's assume we stamp on the "Input" texture.
-        
-        // Actually, WGSL storage textures are usually write-only or read-only unless "storage-texture-tier-2" feature.
-        // So we can't easily read-modify-write the same texture in one pass without that feature.
-        
-        // Alternative: CPU stamping? No, user asked for GPU.
-        // Alternative: A full-screen compute pass that copies everything, and flips if inside stamp area.
-        // Yes, let's do a full grid pass for the stamp. It's fast enough.
-    }
-}
-
-// Re-thinking Stamp Kernel:
-// We will run a compute pass over the ENTIRE grid (like simulation).
-// It will copy 'In' to 'Out'.
-// IF the pixel is within the stamp area AND the pattern bit is 1, it will FLIP the value.
-// This is robust and easy.
-
-@compute @workgroup_size(8, 8)
+@compute @workgroup_size(16, 16)
 fn stampMain(@builtin(global_invocation_id) cell: vec3<u32>) {
-    let x = i32(cell.x);
-    let y = i32(cell.y);
-    let size = textureDimensions(cellStateIn);
-    let width = i32(size.x);
-    let height = i32(size.y);
-
-    if (x >= width || y >= height) {
+    // Optimization: We dispatch ONLY the size of the pattern.
+    // So 'cell' (global_invocation_id) corresponds to the pattern coordinate (0..w, 0..h).
+    
+    let px = i32(cell.x);
+    let py = i32(cell.y);
+    
+    if (px >= stampUniforms.patternSize.x || py >= stampUniforms.patternSize.y) {
         return;
     }
 
-    let currentState = textureLoad(cellStateIn, vec2<i32>(x, y), 0).r;
-    var nextState = currentState;
-
-    // Check if within stamp area relative to clickPos
-    // We need to handle wrapping logic relative to the click.
-    // Let's assume clickPos is top-left of the stamp.
+    // Calculate Grid Coordinate with Wrapping
+    // gridX = (clickPos.x + px) % 256
+    let width = i32(textureDimensions(cellStateIn).x);
+    let height = i32(textureDimensions(cellStateIn).y);
     
-    // Calculate relative coordinates
-    let dx = (x - stampUniforms.clickPos.x + width) % width;
-    let dy = (y - stampUniforms.clickPos.y + height) % height;
+    let gridX = (stampUniforms.clickPos.x + px) % width;
+    let gridY = (stampUniforms.clickPos.y + py) % height;
+    
+    // Handle negative wrapping (if clickPos was negative? Though usually we pass positive)
+    let gx = select(gridX, gridX + width, gridX < 0);
+    let gy = select(gridY, gridY + height, gridY < 0);
 
-    if (dx < stampUniforms.patternSize.x && dy < stampUniforms.patternSize.y) {
-        let patternIndex = dy * stampUniforms.patternSize.x + dx;
-        let patternVal = patternData[patternIndex];
+    let patternIndex = py * stampUniforms.patternSize.x + px;
+    let patternVal = patternData[patternIndex];
+    
+    if (patternVal == 1u) {
+        let currentState = textureLoad(cellStateIn, vec2<i32>(gx, gy), 0).r;
+        var nextState = currentState;
         
-        if (patternVal == 1u) {
-            // FLIP LOGIC
-            // 0 <-> 1
-            // 3 <-> 4
-            // 2 (Chaos) -> No Change
-            
-            if (currentState > -0.5 && currentState < 0.5) { // 0
-                nextState = 1.0;
-            } else if (currentState > 0.5 && currentState < 1.5) { // 1
-                nextState = 0.0;
-            } else if (currentState > 2.5 && currentState < 3.5) { // 3 (Always Dead)
-                nextState = 4.0;
-            } else if (currentState > 3.5 && currentState < 4.5) { // 4 (Always Alive)
-                nextState = 3.0;
-            }
+        // FLIP LOGIC
+        if (currentState > -0.5 && currentState < 0.5) { // 0
+            nextState = 1.0;
+        } else if (currentState > 0.5 && currentState < 1.5) { // 1
+            nextState = 0.0;
+        } else if (currentState > 2.5 && currentState < 3.5) { // 3 (Always Dead)
+            nextState = 4.0;
+        } else if (currentState > 3.5 && currentState < 4.5) { // 4 (Always Alive)
+            nextState = 3.0;
         }
+        
+        textureStore(cellStateOut, vec2<i32>(gx, gy), vec4<f32>(nextState, 0.0, 0.0, 1.0));
+    } else {
+        // If pattern is 0, we do NOTHING?
+        // Wait, if we only dispatch for the pattern, we are NOT copying the rest of the grid!
+        // CRITICAL ISSUE: If we optimize dispatch to only cover the pattern, 
+        // who copies the REST of the grid from In to Out?
+        // 
+        // If we use a separate "Stamp Pass", we need to copy the WHOLE grid.
+        // Unless we can write to the SAME texture (Read-Write).
+        // But we are using ping-pong textures.
+        //
+        // Options:
+        // 1. Dispatch Full Grid (Old way) - Copies everything, modifies stamp.
+        // 2. Copy Texture -> Texture first (CommandEncoder.copyTextureToTexture), THEN dispatch Stamp Kernel over just the area.
+        // 
+        // Option 2 is the optimization!
+        // Copy is very fast. Then we only run compute on the small area.
+        //
+        // So `stampMain` should ONLY write the changed pixels.
+        // It does NOT need to copy unchanged pixels (because we will do a copy first).
+        
+        // So we don't need an 'else' block.
     }
-
-    textureStore(cellStateOut, vec2<i32>(x, y), vec4<f32>(nextState, 0.0, 0.0, 1.0));
 }
 
 // --- History / Trails Shader ---
 
 struct HistoryUniforms {
     decay: f32,
-    isActive: f32, // 0.0 or 1.0
+    isActive: f32,
     _pad1: f32,
     _pad2: f32,
 };
@@ -235,7 +203,7 @@ struct HistoryUniforms {
 @group(0) @binding(8) var historyIn: texture_2d<f32>;
 @group(0) @binding(9) var historyOut: texture_storage_2d<r32float, write>;
 
-@compute @workgroup_size(8, 8)
+@compute @workgroup_size(16, 16)
 fn historyMain(@builtin(global_invocation_id) cell: vec3<u32>) {
     let x = i32(cell.x);
     let y = i32(cell.y);
@@ -252,14 +220,12 @@ fn historyMain(@builtin(global_invocation_id) cell: vec3<u32>) {
     
     var newHistory = oldHistory * historyUniforms.decay;
     
-    // If cell is Alive (1) or Always Alive (4), boost history to 1.0
     if (currentState > 0.5 && currentState < 1.5) {
         newHistory = 1.0;
     } else if (currentState > 3.5) {
         newHistory = 1.0;
     }
     
-    // If trails are inactive, just clear history (or keep it but don't add to it? Let's clear/decay)
     if (historyUniforms.isActive < 0.5) {
         newHistory = 0.0;
     }
@@ -274,6 +240,7 @@ struct Palette {
     chaos: vec4<f32>,
     alwaysDead: vec4<f32>,
     alwaysAlive: vec4<f32>,
+    trail: vec4<f32>, // Added Trail Color
 };
 
 struct ViewUniforms {
@@ -285,13 +252,12 @@ struct ViewUniforms {
 @group(0) @binding(0) var<uniform> palette: Palette;
 @group(0) @binding(3) var cellTexture: texture_2d<f32>;
 @group(0) @binding(6) var<uniform> view: ViewUniforms;
-@group(0) @binding(8) var historyTexture: texture_2d<f32>; // Re-use binding 8 for reading in fragment
+@group(0) @binding(8) var historyTexture: texture_2d<f32>;
 
 @fragment
 fn fragmentMain(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let size = vec2<f32>(textureDimensions(cellTexture));
     
-    // Transform UV for Zoom/Pan
     let world_uv = fract((uv / view.scale) - view.offset);
     
     let coords = vec2<i32>(world_uv * size);
@@ -300,29 +266,29 @@ fn fragmentMain(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     
     var color = palette.bg;
     
-    // Blend history into background if cell is dead
-    if (state < 0.5 || (state > 2.5 && state < 3.5)) {
-        // Dead or Always Dead
-        // Simple additive blend of history color (using FG color for trail)
-        // or a specific trail color? Let's use FG color faded.
-        color = mix(palette.bg, palette.fg, history * 0.5); // Max 50% opacity for trails
-        
-        if (state > 2.5) {
-             // If Always Dead, maybe mix with that instead?
-             color = mix(palette.alwaysDead, palette.fg, history * 0.3);
-        }
-    }
-    
+    // Base Color Logic
     if (state > 3.5) {
         color = palette.alwaysAlive;
     } else if (state > 2.5) {
-        // Already handled above for blending, but if we want strict priority:
-        // color = palette.alwaysDead; 
-        // We let the blend happen above.
+        color = palette.alwaysDead;
     } else if (state > 1.5) {
         color = palette.chaos;
     } else if (state > 0.5) {
         color = palette.fg;
+    }
+    
+    // Trail Overlay
+    // We mix the trail color on top based on history value.
+    // history is 0..1.
+    // We want a subtle effect.
+    // If history is high, we tint towards trail color.
+    // But we don't want to obscure the cell state completely.
+    // Let's use a "screen" or "additive" like blend, or just mix.
+    
+    if (history > 0.01) {
+        // Only blend if there is history
+        let trailAlpha = history * 0.6; // Max 60% opacity
+        color = mix(color, palette.trail, trailAlpha);
     }
     
     return color;

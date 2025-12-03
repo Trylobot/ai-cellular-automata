@@ -33,6 +33,15 @@
                     <input type="number" id="fpsCap" value="12" min="1" max="144">
                 </div>
                 <div class="controls-row">
+                    <label for="gridSizeSelect">Grid Size:</label>
+                    <select id="gridSizeSelect">
+                        <option value="128">128x128</option>
+                        <option value="256" selected>256x256</option>
+                        <option value="512">512x512</option>
+                        <option value="1024">1024x1024</option>
+                    </select>
+                </div>
+                <div class="controls-row">
                     <label for="trailsToggle">Trails:</label>
                     <input type="checkbox" id="trailsToggle">
                     <label for="decayRange" style="margin-left: 10px;">Decay:</label>
@@ -77,9 +86,15 @@
                         <label for="colorAlwaysAlive">A-Alive</label>
                         <input type="color" id="colorAlwaysAlive" value="#CCFFCC">
                     </div>
+                    <div class="color-picker-group">
+                        <label for="colorTrail">Trail</label>
+                        <input type="color" id="colorTrail" value="#FF00FF">
+                    </div>
                 </div>
                 <div class="controls-row">
                     <button class="preset-btn" id="systemPresetBtn">System Default</button>
+                    <label for="statsToggle" style="margin-left: 20px;">Stats:</label>
+                    <input type="checkbox" id="statsToggle">
                 </div>
 
                 <div class="separator"></div>
